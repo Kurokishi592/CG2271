@@ -1,6 +1,6 @@
 # CG2271 Lab
 
-This repository contains work done for lab assignments for CCG2271.
+This repository contains work done for lab assignments for CG2271.
 
 CG2271 Real Time Operating Systems:
 - (lab) RTOS Specific Topics
