@@ -1,10 +1,8 @@
 #include "DHT.h"
 
-// ----- Pin configuration -----
 #define DHTPIN 1        // Signal pin connected to GPIO1 on ESP32
-#define DHTTYPE DHT11   // DHT11 sensor
+#define DHTTYPE DHT11   
 
-// ----- Create DHT object -----
 DHT dht(DHTPIN, DHTTYPE);
 
 void setup() {
@@ -14,13 +12,10 @@ void setup() {
 }
 
 void loop() {
-  // Wait a bit between measurements
-  delay(500);  // DHT11 has a max sampling rate of 1 reading per 2 seconds
+  delay(500); 
 
   float humidity = dht.readHumidity();
   float temperature = dht.readTemperature();  // Default is Celsius
-
-  // Check if any reads failed and exit early (try again next loop)
   if (isnan(humidity) || isnan(temperature)) {
     Serial.println("Failed to read from DHT11 sensor!");
     return;
