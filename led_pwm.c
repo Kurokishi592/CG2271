@@ -28,7 +28,7 @@
 #define MAX_ADC_VALUE 4095
 
 // Define the EMA smoothing factor (Alpha). Closer to 0 for more smoothing.
-#define SMOOTHING_ALPHA 0.10f
+#define SMOOTHING_ALPHA 0.08f
 
 typedef enum {
     LED
