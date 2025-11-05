@@ -1,8 +1,4 @@
 // Moisture Sensor Arduino Code
-
-
-//By Circuitdigest 
-
 #define ledPin 6
 #define sensorPin A0
 
@@ -17,8 +13,6 @@ void loop() {
   Serial.println(readSensor());
   delay(500);
 }
-
-//  This function returns the analog data to calling function
 
 int readSensor() {
   int sensorValue = analogRead(sensorPin);  // Read the analog value from sensor
