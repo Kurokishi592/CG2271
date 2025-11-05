@@ -33,7 +33,7 @@ void initLEDs() {
   PORTE->PCR[BLUELED] &= ~PORT_PCR_MUX_MASK;
   PORTE->PCR[BLUELED] |= PORT_PCR_MUX(1);
 
-  PORTD->PCR[GREENLED] &= PORT_PCR_MUX_MASK;
+  PORTD->PCR[GREENLED] &= ~PORT_PCR_MUX_MASK;
   PORTD->PCR[GREENLED] |= PORT_PCR_MUX(1);
 
   // Set PDDR
@@ -54,10 +54,10 @@ void ledOn() {
 }
 /* Initialize interrupts for SW2 and SW3 */
 
-// SW2 is connected to PTC3, SW3 to PTA4
+// SW2 is connected to PTC5, SW3 to PTA4
 
 #define SW2     3
-#define SW3     4
+//#define SW3     4
 
 // SW2 is connected to PTC3
 void initSW2Interrupt() {
@@ -67,7 +67,7 @@ void initSW2Interrupt() {
   // Disable interrupts before configuring
   NVIC_DisableIRQ(PORTC_PORTD_IRQn);
 
-  // Set PTC3 to GPIO
+  // Set PTC5 to GPIO
   PORTC->PCR[SW2] &= ~PORT_PCR_MUX_MASK;
   PORTC->PCR[SW2] |= PORT_PCR_MUX(1);
 
@@ -80,7 +80,7 @@ void initSW2Interrupt() {
 
   // Configure interrupt for falling edge
   PORTC->PCR[SW2] &= ~PORT_PCR_IRQC_MASK;
-  PORTC->PCR[SW2] |= PORT_PCR_IRQC(0b1010);
+  PORTC->PCR[SW2] |= PORT_PCR_IRQC(0b1001);
 
   // Set NVIC priority to the lowest (192)
   NVIC_SetPriority(PORTC_PORTD_IRQn, 192);
@@ -92,57 +92,9 @@ void initSW2Interrupt() {
   NVIC_EnableIRQ(PORTC_PORTD_IRQn);
 }
 
-// SW3 is connected to pin PTA4
-void initSW3Interrupt() {
-  // Enable clock for PORTA
-  SIM->SCGC5 |= SIM_SCGC5_PORTA_MASK;
-
-  // Disable interrupts before configuring
-  NVIC_DisableIRQ(PORTA_IRQn);
-
-  // Set PTA4 to GPIO
-  PORTA->PCR[SW3] &= ~PORT_PCR_MUX_MASK;
-  PORTA->PCR[SW3] |= PORT_PCR_MUX(1);
-
-  // Enable pull-up resistor (PS bit) and pull enable (PE bit)
-  PORTA->PCR[SW3] |= PORT_PCR_PS_MASK;
-  PORTA->PCR[SW3] |= PORT_PCR_PE_MASK;
-
-  // Set as input
-  GPIOA->PDDR &= ~(1 << SW3);
-
-  // Configure interrupt for falling edge
-  PORTA->PCR[SW3] &= ~PORT_PCR_IRQC_MASK;
-  PORTA->PCR[SW3] |= PORT_PCR_IRQC(0b1010);
-
-  // Set NVIC priority to the lowest (192)
-  NVIC_SetPriority(PORTA_IRQn, 192);
-
-  // Clear pending interrupts
-  NVIC_ClearPendingIRQ(PORTA_IRQn);
-
-  // Enable interrupts
-  NVIC_EnableIRQ(PORTA_IRQn);
-}
-
-
 
 int mode = 0;
 
-// SW3 handler. SW3 toggles the mode
-void PORTA_IRQHandler() {
-  // Clear pending IRQ for PORTA
-  NVIC_ClearPendingIRQ(PORTA_IRQn);
-
-  // Check that SW3 was triggered
-  if(PORTA->ISFR & (1 << SW3)) {
-    // mode cycles from 0 to 1 to 2 to 0, etc.
-    mode = (mode + 1) % 3;
-  }
-
-  // Write a 1 to clear the ISFR bit
-  PORTA->ISFR |= (1 << SW3);
-}
 
 // SW2 handler.  SW2 toggles the red LED
 // in mode 0, the green LED in mode 1,
@@ -154,24 +106,13 @@ void PORTC_IRQHandler() {
 
   // Check that it is SW2 pressed
   if(PORTC->ISFR & (1 << SW2)) {
-    switch(mode) {
-    case 0:
       GPIOE->PTOR |= (1 << REDLED);
-      break;
-
-    case 1:
-      GPIOD->PTOR |= (1 << GREENLED);
-      break;
-
-    case 2:
-      GPIOE->PTOR |= (1 << BLUELED);
-      break;
-
-    } // switch
+    } else {
+    	GPIOD->PTOR |= (1 << GREENLED); // switch
+    }
 
     // Write a 1 to clear the ISFR bit
     PORTC->ISFR |= (1 << SW2);
-  }
 }
 
 int main(void) {
@@ -185,7 +126,6 @@ int main(void) {
   BOARD_InitDebugConsole();
 #endif
 
-
   PRINTF("Hello World\r\n");
 
   // Initialize LEDs
@@ -196,7 +136,7 @@ int main(void) {
 
   // Initialize SW2 and SW3 interrupts
   initSW2Interrupt();
-  initSW3Interrupt();
+//  initSW3Interrupt();
 
   /* Force the counter to be placed into memory. */
   volatile static int i = 0 ;
