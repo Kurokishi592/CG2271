@@ -56,8 +56,10 @@ void initSW2Interrupt() {
   PORTC->PCR[SW2] |= PORT_PCR_MUX(1);
 
   // Enable pull-up resistor (PS bit) and pull enable (PE bit)
-  PORTC->PCR[SW2] &= ~(PORT_PCR_PS_MASK);
-  PORTC->PCR[SW2] |= PORT_PCR_PE_MASK;
+  PORTC->PCR[SW2] &= ~PORT_PCR_PS_MASK;
+  PORTC->PCR[SW2] |= PORT_PCR_PS(1);
+  PORTC->PCR[SW2] &= ~(PORT_PCR_PE_MASK);
+  PORTC->PCR[SW2] |= PORT_PCR_PE(1);
 
   // Set as input
   GPIOC->PDDR &= ~(1 << SW2);
