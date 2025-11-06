@@ -16,47 +16,31 @@
 #include "clock_config.h"
 #include "fsl_debug_console.h"
 
-// LEDs
-// RED: PTE31
-// GREEN: PTD5
-// BLUE: PTE29
 
-#define REDLED      31
-#define GREENLED    5
-#define BLUELED     29
+#define INTERRUPTPIN 6 //PTD6
 
 void initLEDs() {
   SIM->SCGC5 |= (SIM_SCGC5_PORTD_MASK | SIM_SCGC5_PORTE_MASK);
-  PORTE->PCR[REDLED] &= ~PORT_PCR_MUX_MASK;
-  PORTE->PCR[REDLED] |= PORT_PCR_MUX(1);
-
-  PORTE->PCR[BLUELED] &= ~PORT_PCR_MUX_MASK;
-  PORTE->PCR[BLUELED] |= PORT_PCR_MUX(1);
-
-  PORTD->PCR[GREENLED] &= ~PORT_PCR_MUX_MASK;
-  PORTD->PCR[GREENLED] |= PORT_PCR_MUX(1);
-
+  PORTD->PCR[INTERRUPTPIN] &= ~PORT_PCR_MUX_MASK;
+  PORTD->PCR[INTERRUPTPIN] |= PORT_PCR_MUX(1);
   // Set PDDR
-  GPIOE->PDDR |= ((1 << REDLED) | (1 << BLUELED));
-  GPIOD->PDDR |= (1 << GREENLED);
+  GPIOD->PDDR |= (1 << INTERRUPTPIN);
 }
 
 // Switch off all LEDs
 void ledOff() {
-  GPIOE->PSOR |= ((1 << REDLED) | (1 << BLUELED));
-  GPIOD->PSOR |= (1 << GREENLED);
+  GPIOD->PSOR |= (1 << INTERRUPTPIN);
 }
 
 // Switch on all LEDs
 void ledOn() {
-  GPIOE->PCOR |= ((1 << REDLED) | (1 << BLUELED));
-  GPIOD->PCOR |= (1 << GREENLED);
+  GPIOD->PCOR |= (1 << INTERRUPTPIN);
 }
 /* Initialize interrupts for SW2 and SW3 */
 
 // SW2 is connected to PTC5, SW3 to PTA4
 
-#define SW2     3
+#define SW2     5
 //#define SW3     4
 
 // SW2 is connected to PTC3
@@ -72,7 +56,7 @@ void initSW2Interrupt() {
   PORTC->PCR[SW2] |= PORT_PCR_MUX(1);
 
   // Enable pull-up resistor (PS bit) and pull enable (PE bit)
-  PORTC->PCR[SW2] |= PORT_PCR_PS_MASK;
+  PORTC->PCR[SW2] &= ~(PORT_PCR_PS_MASK);
   PORTC->PCR[SW2] |= PORT_PCR_PE_MASK;
 
   // Set as input
@@ -100,17 +84,19 @@ int mode = 0;
 // in mode 0, the green LED in mode 1,
 // and the blue LED in mode 2
 
-void PORTC_IRQHandler() {
+void PORTC_PORTD_IRQHandler() {
   // Clear pending IRQ for PORTC
   NVIC_ClearPendingIRQ(PORTC_PORTD_IRQn);
 
   // Check that it is SW2 pressed
-  if(PORTC->ISFR & (1 << SW2)) {
-      GPIOE->PTOR |= (1 << REDLED);
-    } else {
-    	GPIOD->PTOR |= (1 << GREENLED); // switch
-    }
+  if (PORTC->PCR[SW2] & PORT_PCR_ISF_MASK) {
 
+      // Toggle LED (example)
+      GPIOD->PTOR = (1 << INTERRUPTPIN);
+
+      // Clear interrupt flag correctly
+      PORTC->PCR[SW2] |= PORT_PCR_ISF_MASK;
+  }
     // Write a 1 to clear the ISFR bit
     PORTC->ISFR |= (1 << SW2);
 }
