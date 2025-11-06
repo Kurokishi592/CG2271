@@ -15,7 +15,7 @@
 #include "pin_mux.h"
 #include "clock_config.h"
 #include "fsl_debug_console.h"
-
+#include "fsl_common.h"
 
 #define INTERRUPTPIN 6 //PTD6
 
@@ -29,22 +29,57 @@ void initLEDs() {
 
 // Switch off all LEDs
 void ledOff() {
-  GPIOD->PSOR |= (1 << INTERRUPTPIN);
+  GPIOD->PCOR |= (1 << INTERRUPTPIN);
 }
 
 // Switch on all LEDs
 void ledOn() {
-  GPIOD->PCOR |= (1 << INTERRUPTPIN);
+  GPIOD->PSOR |= (1 << INTERRUPTPIN);
 }
 /* Initialize interrupts for SW2 and SW3 */
 
-// SW2 is connected to PTC5, SW3 to PTA4
+// TILTSWITCH is connected to PTC5, SW3 to PTA4
 
-#define SW2     5
-//#define SW3     4
+#define TILTSWITCH     5
+#define SW3     4
 
-// SW2 is connected to PTC3
-void initSW2Interrupt() {
+// SW3 is connected to PTA4
+void initSW3Interrupt() {
+  // Enable clock for PORTA
+  SIM->SCGC5 |= SIM_SCGC5_PORTA_MASK;
+
+  // Disable interrupts before configuring
+  NVIC_DisableIRQ(PORTA_IRQn);
+
+  // Set PTC5 to GPIO
+  PORTA->PCR[SW3] &= ~PORT_PCR_MUX_MASK;
+  PORTA->PCR[SW3] |= PORT_PCR_MUX(1);
+
+  // Enable pull-up resistor (PS bit) and pull enable (PE bit)
+  PORTA->PCR[SW3] &= ~PORT_PCR_PS_MASK;
+  PORTA->PCR[SW3] |= PORT_PCR_PS(1);
+  PORTA->PCR[SW3] &= ~PORT_PCR_PE_MASK;
+  PORTA->PCR[SW3] |= PORT_PCR_PE(1);
+
+  // Set as input
+  GPIOA->PDDR &= ~(1 << SW3);
+
+  // Configure interrupt for falling edge
+  PORTA->PCR[SW3] &= ~PORT_PCR_IRQC_MASK;
+  PORTA->PCR[SW3] |= PORT_PCR_IRQC(0b1001);
+
+  // Set NVIC priority to the lowest (192)
+  NVIC_SetPriority(PORTA_IRQn, 192); //TODO: upgrade this priority to override tilt
+
+  // Clear pending interrupts
+  NVIC_ClearPendingIRQ(PORTA_IRQn);
+
+  // Enable interrupts
+  NVIC_EnableIRQ(PORTA_IRQn);
+}
+
+// TILTSWITCH is connected to PTC3
+void initTILTSWITCHInterrupt() {
   // Enable clock for PORTC
   SIM->SCGC5 |= SIM_SCGC5_PORTC_MASK;
 
@@ -52,21 +87,21 @@ void initSW2Interrupt() {
   NVIC_DisableIRQ(PORTC_PORTD_IRQn);
 
   // Set PTC5 to GPIO
-  PORTC->PCR[SW2] &= ~PORT_PCR_MUX_MASK;
-  PORTC->PCR[SW2] |= PORT_PCR_MUX(1);
+  PORTC->PCR[TILTSWITCH] &= ~PORT_PCR_MUX_MASK;
+  PORTC->PCR[TILTSWITCH] |= PORT_PCR_MUX(1);
 
   // Enable pull-up resistor (PS bit) and pull enable (PE bit)
-  PORTC->PCR[SW2] &= ~PORT_PCR_PS_MASK;
-  PORTC->PCR[SW2] |= PORT_PCR_PS(1);
-  PORTC->PCR[SW2] &= ~(PORT_PCR_PE_MASK);
-  PORTC->PCR[SW2] |= PORT_PCR_PE(1);
+  PORTC->PCR[TILTSWITCH] &= ~PORT_PCR_PS_MASK;
+  PORTC->PCR[TILTSWITCH] |= PORT_PCR_PS(1);
+  PORTC->PCR[TILTSWITCH] &= ~PORT_PCR_PE_MASK;
+  PORTC->PCR[TILTSWITCH] |= PORT_PCR_PE(1);
 
   // Set as input
-  GPIOC->PDDR &= ~(1 << SW2);
+  GPIOC->PDDR &= ~(1 << TILTSWITCH);
 
   // Configure interrupt for falling edge
-  PORTC->PCR[SW2] &= ~PORT_PCR_IRQC_MASK;
-  PORTC->PCR[SW2] |= PORT_PCR_IRQC(0b1001);
+  PORTC->PCR[TILTSWITCH] &= ~PORT_PCR_IRQC_MASK;
+  PORTC->PCR[TILTSWITCH] |= PORT_PCR_IRQC(0b1001);
 
   // Set NVIC priority to the lowest (192)
   NVIC_SetPriority(PORTC_PORTD_IRQn, 192);
@@ -79,29 +114,36 @@ void initSW2Interrupt() {
 }
 
 
-int mode = 0;
-
-
-// SW2 handler.  SW2 toggles the red LED
-// in mode 0, the green LED in mode 1,
-// and the blue LED in mode 2
+// TILTSWITCH handler.  TILTSWITCH switches on the red LED
 
 void PORTC_PORTD_IRQHandler() {
   // Clear pending IRQ for PORTC
-  NVIC_ClearPendingIRQ(PORTC_PORTD_IRQn);
+	NVIC_ClearPendingIRQ(PORTC_PORTD_IRQn);
+
+	// Check that it is TILTSWITCH pressed
+	if (PORTC->ISFR & 1 << TILTSWITCH) {
+	  GPIOD->PSOR = (1 << INTERRUPTPIN);  // Toggle mode
+	}
+	// Write a 1 to clear the ISFR bit
+	PORTC->ISFR |= (1 << TILTSWITCH);
+}
+
+
+// SW3 handler.  SW3 switches off the red LED
+void PORTA_IRQHandler() {
+  // Clear pending IRQ for PORTA
+  NVIC_ClearPendingIRQ(PORTA_IRQn);
 
   // Check that it is SW2 pressed
-  if (PORTC->PCR[SW2] & PORT_PCR_ISF_MASK) {
-
-      // Toggle LED (example)
-      GPIOD->PTOR = (1 << INTERRUPTPIN);
-
+  if (PORTA->ISFR & 1 << SW3) {
+	  GPIOD->PCOR = (1 << INTERRUPTPIN);  // Toggle mode
       // Clear interrupt flag correctly
-      PORTC->PCR[SW2] |= PORT_PCR_ISF_MASK;
+      PORTA->PCR[SW3] |= PORT_PCR_ISF_MASK;
   }
     // Write a 1 to clear the ISFR bit
-    PORTC->ISFR |= (1 << SW2);
+    PORTA->ISFR |= (1 << SW3);
 }
+
 
 int main(void) {
 
@@ -123,7 +165,8 @@ int main(void) {
   ledOff();
 
   // Initialize SW2 and SW3 interrupts
-  initSW2Interrupt();
+  initSW3Interrupt();
+  initTILTSWITCHInterrupt();
 //  initSW3Interrupt();
 
   /* Force the counter to be placed into memory. */
