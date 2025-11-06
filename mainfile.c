@@ -23,7 +23,8 @@
 #include "task.h"
 
 
-SemaphoreHandle_t arm_state_signal;
+SemaphoreHandle_t arm_state_signal; //Semaphore handling arm/disarmed
+SemaphoreHandle_t alarm_signal; //Semaphore handling LDR sensor
 
 /* Initialize interrupts for SW2 and SW3 */
 
@@ -122,14 +123,27 @@ void initTILTSWITCHInterrupt() {
 }
 
 //Called when task is
-static void armBoardTask(void *p) {
-	//TODO: Refactor to make this a task
-	while()
-}
-
-static void disarmBoardTask(void *p) {
-	//TODO:  Refactor to make this a task
-}
+//static void armBoardTask(void *p) {
+//	//TODO: Refactor to make this a task
+//	while(1) {
+//		//Wait for armed state
+//		if (xSemaphoreTake(arm_state_signal, portMAX_DELAY) == pdTRUE) {
+//			//Do shit here
+//			  GPIOD->PSOR = (1 << INTERRUPTPIN);  // Toggle mode
+//		}
+//	}
+//}
+//
+//static void disarmBoardTask(void *p) {
+//	//TODO:  Refactor to make this a task
+//	while(1) {
+//		//Wait for armed state
+//		if (xSemaphoreTake(arm_state_signal, 0) == pdTRUE) {
+//			//Do shit here
+//			  GPIOD->PCOR = (1 << INTERRUPTPIN);  // Toggle mode
+//		}
+//	}
+//}
 
 // TILTSWITCH IRQHandler.  TILTSWITCH switches on the red LED
 void PORTC_PORTD_IRQHandler() {
@@ -139,13 +153,17 @@ void PORTC_PORTD_IRQHandler() {
 	// Check that it is TILTSWITCH pressed
 	if (PORTC->ISFR & 1 << TILTSWITCH) {
 	  GPIOD->PSOR = (1 << INTERRUPTPIN);  // Toggle mode
+	  BaseType_t hpw;
+	  xSemaphoreGiveFromISR(arm_state_signal,&hpw);
+	  portYIELD_FROM_ISR(hpw);
+
 	}
 	// Write a 1 to clear the ISFR bit
 	PORTC->ISFR |= (1 << TILTSWITCH);
 }
 
 
-// SW3 IRQHandler.  TILTSWITCH switches on the red LED
+// SW3 IRQHandler.  SW3 switches on the red LED
 void PORTA_IRQHandler() {
   // Clear pending IRQ for PORTA
   NVIC_ClearPendingIRQ(PORTA_IRQn);
@@ -153,6 +171,9 @@ void PORTA_IRQHandler() {
   // Check that it is SW2 pressed
   if (PORTA->ISFR & 1 << SW3) {
 	  GPIOD->PCOR = (1 << INTERRUPTPIN);  // Toggle mode
+	  BaseType_t hpw;
+	  xSemaphoreTakeFromISR(arm_state_signal, &hpw);
+	  portYIELD_FROM_ISR(hpw);
       // Clear interrupt flag correctly
       PORTA->PCR[SW3] |= PORT_PCR_ISF_MASK;
   }
@@ -323,31 +344,41 @@ void playTone(uint32_t frequency_hz, uint32_t duration_ms) {
 
 // --- START: Added function to play a simple, high-pitched tune ---
 void playHappyTuneTask() {
-	PRINTF("Playing Happy Tune...\r\n");
 
-	// Play 8th notes (125ms duration) from a simple major scale sequence
-	playTone(NOTE_C4, 125); // C
-	delay_ms(10);
-	playTone(NOTE_D4, 125); // D
-	delay_ms(10);
-	playTone(NOTE_E4, 125); // E
-	delay_ms(10);
-	playTone(NOTE_C5, 250); // C (Higher) - Quarter note
+	while(1) {
 
-	delay_ms(100); // Short rest
+        if (xSemaphoreTake(arm_state_signal, portMAX_DELAY) == pdTRUE) {
+            // We took it, so put it back to keep it "ON"
+            xSemaphoreGive(arm_state_signal);
+        }
 
-	playTone(NOTE_G4, 125); // G
-	delay_ms(10);
-	playTone(NOTE_E4, 125); // E
-	delay_ms(10);
-	playTone(NOTE_C4, 300); // C (Low) - Dotted Quarter note
+		while (xSemaphoreTake(arm_state_signal, portMAX_DELAY) == pdTRUE) {
+			xSemaphoreGive(arm_state_signal);
+			// Play 8th notes (125ms duration) from a simple major scale sequence
+			playTone(NOTE_C4, 125); // C
+			delay_ms(10);
+			playTone(NOTE_D4, 125); // D
+			delay_ms(10);
+			playTone(NOTE_E4, 125); // E
+			delay_ms(10);
+			playTone(NOTE_C5, 250); // C (Higher) - Quarter note
+
+			delay_ms(100); // Short rest
+
+			playTone(NOTE_G4, 125); // G
+			delay_ms(10);
+			playTone(NOTE_E4, 125); // E
+			delay_ms(10);
+			playTone(NOTE_C4, 300); // C (Low) - Dotted Quarter note
+			vTaskDelay(500);
+		}
+	}
 }
 // --- END: Added function to play a simple, high-pitched tune ---
 
 // --- START: Added function to play a sad/police siren wailing tone ---
 void playPoliceSirenTask() {
-	PRINTF("Playing Police Siren...\r\n");
-
+//	PRINTF("Playing Police Siren...\r\n");
 	// The siren effect is created by quickly ramping the frequency up and down.
 	const int delay_time = 5; // milliseconds of delay for each step
 	const int steps = 10; // number of steps from min to max frequency
@@ -371,9 +402,9 @@ void playPoliceSirenTask() {
 			delay_ms(delay_time);
 		}
 	}
-
 	// Stop the sound completely after the wail sequence finishes
 	setBuzzerFrequency(0);
+
 }
 // --- END: Added function to play a sad/police siren wailing tone ---
 
@@ -401,89 +432,89 @@ volatile int adcValue = 0;
 volatile int newDataReady = 0;
 volatile float filteredAdcValue = 0.0f; // Stores the smoothed ADC value
 
-void setMCGIRClk() {
-    MCG->C1 &= ~MCG_C1_CLKS_MASK;
-    // Choose MCG clock source of 01 for LIRC and enable IRCLKEN
-    MCG->C1 |= ((MCG_C1_CLKS(0b01) | MCG_C1_IRCLKEN_MASK));
-
-    // Set IRCS to 1 to choose 8 MHz clock
-    MCG->C2 |= MCG_C2_IRCS_MASK;
-
-    // Choose FCRDIV of 0 for divisor of 1
-    MCG->SC &= ~MCG_SC_FCRDIV_MASK;
-    MCG->SC |= MCG_SC_FCRDIV(0b0);
-
-    // Choose LIRC_DIV2 of 0 for divisor of 1
-    MCG->MC &= ~MCG_MC_LIRC_DIV2_MASK;
-    MCG->MC |= MCG_MC_LIRC_DIV2(0b0);
-}
-
-/**
- * Set TPM Clock Source to MCGIRCLK (8 MHz)
- */
-void setTPMClock(){
-    setMCGIRClk();
-
-    // Choose MCGIRCLK (8 MHz) as TPM clock source
-    SIM->SOPT2 &= ~SIM_SOPT2_TPMSRC_MASK;
-    SIM->SOPT2 |= SIM_SOPT2_TPMSRC(0b11);
-}
-
-/**
- * Initialize PWM for LED control on PTE30
- * LED connected to: PTE30 TPM0 CH3 ALT3
- * TODO: Change this to utilise another clock.
- */
-void initPWM() {
-    // Turn on clock gating to TPM0
-    SIM->SCGC6 |= SIM_SCGC6_TPM0_MASK;
-
-    // Turn on clock gating to Port E
-    SIM->SCGC5 |= SIM_SCGC5_PORTE_MASK;
-
-    // Set the pin multiplexor for PWM
-    PORTE->PCR[LED_PIN] &= ~PORT_PCR_MUX_MASK;
-    PORTE->PCR[LED_PIN] |= PORT_PCR_MUX(0b11);  // ALT3 for TPM0_CH3
-
-    // Set pin to output
-    GPIOE->PDDR |= (1 << LED_PIN);
-
-    // Set up TPM0
-    // Turn off TPM0 and clear the prescalar field
-    TPM0->SC &= ~(TPM_SC_CMOD_MASK | TPM_SC_PS_MASK);
-
-    // Set prescalar of 128
-    TPM0->SC |= TPM_SC_PS(0b111);
-
-    // Select centre-aligned PWM mode
-    TPM0->SC |= TPM_SC_CPWMS_MASK;
-
-    // Initialize count to 0
-    TPM0->CNT = 0;
-
-    // PWM frequency = 8 MHz / 128 = 62500 Hz
-    // For 500Hz PWM: MOD = 62500/500 = 125
-    TPM0->MOD = 125;
-
-    // Configure Channel 3 for LED
-    // MS=10, ELS=01 (Reverse PWM - LED is active low)
-    TPM0->CONTROLS[3].CnSC &= ~(TPM_CnSC_MSA_MASK | TPM_CnSC_ELSB_MASK);
-    TPM0->CONTROLS[3].CnSC |= (TPM_CnSC_MSB(1) | TPM_CnSC_ELSA(1));
-}
-
-/**
- * Start PWM operation
- */
-void startPWM() {
-    TPM0->SC |= TPM_SC_CMOD(0b01);
-}
-
-/**
- * Stop PWM operation
- */
-void stopPWM() {
-    TPM0->SC &= ~TPM_SC_CMOD_MASK;
-}
+//void setMCGIRClk() {
+//    MCG->C1 &= ~MCG_C1_CLKS_MASK;
+//    // Choose MCG clock source of 01 for LIRC and enable IRCLKEN
+//    MCG->C1 |= ((MCG_C1_CLKS(0b01) | MCG_C1_IRCLKEN_MASK));
+//
+//    // Set IRCS to 1 to choose 8 MHz clock
+//    MCG->C2 |= MCG_C2_IRCS_MASK;
+//
+//    // Choose FCRDIV of 0 for divisor of 1
+//    MCG->SC &= ~MCG_SC_FCRDIV_MASK;
+//    MCG->SC |= MCG_SC_FCRDIV(0b0);
+//
+//    // Choose LIRC_DIV2 of 0 for divisor of 1
+//    MCG->MC &= ~MCG_MC_LIRC_DIV2_MASK;
+//    MCG->MC |= MCG_MC_LIRC_DIV2(0b0);
+//}
+//
+///**
+// * Set TPM Clock Source to MCGIRCLK (8 MHz)
+// */
+//void setTPMClock(){
+//    setMCGIRClk();
+//
+//    // Choose MCGIRCLK (8 MHz) as TPM clock source
+//    SIM->SOPT2 &= ~SIM_SOPT2_TPMSRC_MASK;
+//    SIM->SOPT2 |= SIM_SOPT2_TPMSRC(0b11);
+//}
+//
+///**
+// * Initialize PWM for LED control on PTE30
+// * LED connected to: PTE30 TPM0 CH3 ALT3
+// * TODO: Change this to utilise another clock.
+// */
+//void initPWM() {
+//    // Turn on clock gating to TPM0
+//    SIM->SCGC6 |= SIM_SCGC6_TPM0_MASK;
+//
+//    // Turn on clock gating to Port E
+//    SIM->SCGC5 |= SIM_SCGC5_PORTE_MASK;
+//
+//    // Set the pin multiplexor for PWM
+//    PORTE->PCR[LED_PIN] &= ~PORT_PCR_MUX_MASK;
+//    PORTE->PCR[LED_PIN] |= PORT_PCR_MUX(0b11);  // ALT3 for TPM0_CH3
+//
+//    // Set pin to output
+//    GPIOE->PDDR |= (1 << LED_PIN);
+//
+//    // Set up TPM0
+//    // Turn off TPM0 and clear the prescalar field
+//    TPM0->SC &= ~(TPM_SC_CMOD_MASK | TPM_SC_PS_MASK);
+//
+//    // Set prescalar of 128
+//    TPM0->SC |= TPM_SC_PS(0b111);
+//
+//    // Select centre-aligned PWM mode
+//    TPM0->SC |= TPM_SC_CPWMS_MASK;
+//
+//    // Initialize count to 0
+//    TPM0->CNT = 0;
+//
+//    // PWM frequency = 8 MHz / 128 = 62500 Hz
+//    // For 500Hz PWM: MOD = 62500/500 = 125
+//    TPM0->MOD = 125;
+//
+//    // Configure Channel 3 for LED
+//    // MS=10, ELS=01 (Reverse PWM - LED is active low)
+//    TPM0->CONTROLS[3].CnSC &= ~(TPM_CnSC_MSA_MASK | TPM_CnSC_ELSB_MASK);
+//    TPM0->CONTROLS[3].CnSC |= (TPM_CnSC_MSB(1) | TPM_CnSC_ELSA(1));
+//}
+//
+///**
+// * Start PWM operation
+// */
+//void startPWM() {
+//    TPM0->SC |= TPM_SC_CMOD(0b01);
+//}
+//
+///**
+// * Stop PWM operation
+// */
+//void stopPWM() {
+//    TPM0->SC &= ~TPM_SC_CMOD_MASK;
+//}
 
 /**
  * Set PWM duty cycle (brightness)
@@ -607,13 +638,13 @@ void ADC0_IRQHandler() {
     }
 }
 
-static void convertADCTask(*p) {
-	//TODO: Refactor to make ADC conversion into a task (from IRQ)
-}
-
-static void setPWMTask(*p) {
-	//TODO: Refactor to make setting PWM a task
-}
+//static void convertADCTask(*p) {
+//	//TODO: Refactor to make ADC conversion into a task (from IRQ)
+//}
+//
+//static void setPWMTask(*p) {
+//	//TODO: Refactor to make setting PWM a task
+//}
 
 int main(void) {
 
@@ -642,14 +673,15 @@ int main(void) {
 
   initPWM(); // Initializes TPM0 for buzzer PWM
 
-  initADC();
-  setPWM(LED, 0);  // Start with LED off
-
-  startADC(ADC_CHANNEL);  // Start continuous ADC conversion
+//  initADC();
+//  setPWM(LED, 0);  // Start with LED off
+//
+//  startADC(ADC_CHANNEL);  // Start continuous ADC conversion
 
   arm_state_signal = xSemaphoreCreateBinary();
-//  xTaskCreate(playHappyTuneTask, "task_happy", configMINIMAL_STACK_SIZE+100, NULL, 3, NULL);
-//  xTaskCreate(playPoliceSirenTask, "task_alert", configMINIMAL_STACK_SIZE+100, NULL, 2, NULL);
+  xTaskCreate(playHappyTuneTask, "task_happy", configMINIMAL_STACK_SIZE+100, NULL, 2, NULL);
+//  xTaskCreate(playPoliceSirenTask, "task_alert", configMINIMAL_STACK_SIZE+100, NULL, 3, NULL);
+  vTaskStartScheduler();
 
   /* Force the counter to be placed into memory. */
   volatile static int i = 0 ;
