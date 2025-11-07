@@ -156,7 +156,6 @@ void PORTC_PORTD_IRQHandler() {
 	  BaseType_t hpw;
 	  xSemaphoreGiveFromISR(arm_state_signal,&hpw);
 	  portYIELD_FROM_ISR(hpw);
-
 	}
 	// Write a 1 to clear the ISFR bit
 	PORTC->ISFR |= (1 << TILTSWITCH);
@@ -327,50 +326,88 @@ void setBuzzerFrequency(uint32_t frequency_hz) {
 	TPM0->CONTROLS[2].CnV = duty_cycle_value;
 }
 
-// Function to play a tone for a specific duration
-void playTone(uint32_t frequency_hz, uint32_t duration_ms) {
+//// Function to play a tone for a specific duration
+//void playToneInterruptible(uint32_t frequency_hz, uint32_t duration_ms) {
+//	// 1. Set the PWM frequency
+//	setBuzzerFrequency(frequency_hz);
+//
+//	// 2. Start the PWM if it's not already running
+//	startPWM();
+//
+//	// 3. Wait for the specified duration
+//	delay_ms(duration_ms);
+//
+//	// 4. Stop the tone by setting frequency to 0 (CnV=0)
+//	setBuzzerFrequency(0);
+//}
+
+
+////Plays a tone that as an interruptible task.
+void playToneInterruptible(uint32_t freq, uint32_t duration_ms)
+{
+    uint32_t elapsed = 0;
 	// 1. Set the PWM frequency
-	setBuzzerFrequency(frequency_hz);
+	setBuzzerFrequency(freq);
 
 	// 2. Start the PWM if it's not already running
 	startPWM();
 
-	// 3. Wait for the specified duration
-	delay_ms(duration_ms);
+    while (elapsed < duration_ms)
+    {
+        // Check if state was turned off
+        if (xSemaphoreTake(arm_state_signal, 0) != pdTRUE)
+        {
+//            xSemaphoreGive(arm_state_signal);  // keep semaphore ON
+            setBuzzerFrequency(0);   // immediate cutoff
+            return;
+        }
 
-	// 4. Stop the tone by setting frequency to 0 (CnV=0)
-	setBuzzerFrequency(0);
+        xSemaphoreGive(arm_state_signal);  // keep semaphore ON
+        vTaskDelay(pdMS_TO_TICKS(5));      // 1ms chunk
+//        delay_ms(10);
+        elapsed++;
+    }
+
+    setBuzzerFrequency(0);   // immediate cutoff after done playing
+    return;
 }
-
 // --- START: Added function to play a simple, high-pitched tune ---
-void playHappyTuneTask() {
+void playHappyTuneTask(void *P) {
 
 	while(1) {
 
-        if (xSemaphoreTake(arm_state_signal, portMAX_DELAY) == pdTRUE) {
-            // We took it, so put it back to keep it "ON"
-            xSemaphoreGive(arm_state_signal);
-        }
+//        if (xSemaphoreTake(arm_state_signal, portMAX_DELAY) == pdTRUE) {
+//            // We took it, so put it back to keep it "ON"
+//            xSemaphoreGive(arm_state_signal);
+//        }
+//        xSemaphoreTake(arm_state_signal, portMAX_DELAY);
+//        xSemaphoreGive(arm_state_signal);  // Keep state ON
 
-		while (xSemaphoreTake(arm_state_signal, portMAX_DELAY) == pdTRUE) {
-			xSemaphoreGive(arm_state_signal);
+		if (xSemaphoreTake(arm_state_signal, portMAX_DELAY) == pdTRUE) {
+//			xSemaphoreGive(arm_state_signal);
 			// Play 8th notes (125ms duration) from a simple major scale sequence
-			playTone(NOTE_C4, 125); // C
-			delay_ms(10);
-			playTone(NOTE_D4, 125); // D
-			delay_ms(10);
-			playTone(NOTE_E4, 125); // E
-			delay_ms(10);
-			playTone(NOTE_C5, 250); // C (Higher) - Quarter note
+			playToneInterruptible(NOTE_C4, 125); // C
+//			delay_ms(10);
+			vTaskDelay(pdMS_TO_TICKS(10));      // 1ms chunk
+			playToneInterruptible(NOTE_D4, 125); // D
+//			delay_ms(10);
+			vTaskDelay(pdMS_TO_TICKS(10));      // 1ms chunk
+			playToneInterruptible(NOTE_E4, 125); // E
+//			delay_ms(10);
+			vTaskDelay(pdMS_TO_TICKS(10));      // 1ms chunk
+			playToneInterruptible(NOTE_C5, 125); // C (Higher) - Quarter note
 
-			delay_ms(100); // Short rest
+//			delay_ms(100); // Short rest
 
-			playTone(NOTE_G4, 125); // G
-			delay_ms(10);
-			playTone(NOTE_E4, 125); // E
-			delay_ms(10);
-			playTone(NOTE_C4, 300); // C (Low) - Dotted Quarter note
-			vTaskDelay(500);
+			playToneInterruptible(NOTE_G4, 125); // G
+//			delay_ms(10);
+			vTaskDelay(pdMS_TO_TICKS(10));      // 1ms chunk
+			playToneInterruptible(NOTE_E4, 125); // E
+//			delay_ms(10);
+			vTaskDelay(pdMS_TO_TICKS(10));      // 1ms chunk
+			playToneInterruptible(NOTE_C4, 125); // C (Low) - Dotted Quarter note
+			vTaskDelay(pdMS_TO_TICKS(10));      // 1ms chunk
+//			vTaskDelay(500);
 		}
 	}
 }
@@ -587,7 +624,7 @@ void initADC() {
     NVIC_SetPriority(ADC0_IRQn, 192);
     NVIC_EnableIRQ(ADC0_IRQn);
 
-    PRINTF("ADC initialized for continuous conversion\r\n");
+  //  PRINTF("ADC initialized for continuous conversion\r\n");
 }
 
 /**
@@ -673,7 +710,7 @@ int main(void) {
 
   initPWM(); // Initializes TPM0 for buzzer PWM
 
-//  initADC();
+  initADC();
 //  setPWM(LED, 0);  // Start with LED off
 //
 //  startADC(ADC_CHANNEL);  // Start continuous ADC conversion
