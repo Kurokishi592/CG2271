@@ -357,18 +357,17 @@ void playToneInterruptible(uint32_t freq, uint32_t duration_ms)
         // Check if state was turned off
         if (xSemaphoreTake(arm_state_signal, 0) != pdTRUE)
         {
-//            xSemaphoreGive(arm_state_signal);  // keep semaphore ON
             setBuzzerFrequency(0);   // immediate cutoff
             return;
         }
 
         xSemaphoreGive(arm_state_signal);  // keep semaphore ON
-        vTaskDelay(pdMS_TO_TICKS(5));      // 1ms chunk
-//        delay_ms(10);
+        delay_ms(1); //it exists so therefore it does
         elapsed++;
     }
 
     setBuzzerFrequency(0);   // immediate cutoff after done playing
+    vTaskDelay(pdMS_TO_TICKS(5)); //delay task to allow this to play later
     return;
 }
 // --- START: Added function to play a simple, high-pitched tune ---
@@ -376,39 +375,27 @@ void playHappyTuneTask(void *P) {
 
 	while(1) {
 
-//        if (xSemaphoreTake(arm_state_signal, portMAX_DELAY) == pdTRUE) {
-//            // We took it, so put it back to keep it "ON"
-//            xSemaphoreGive(arm_state_signal);
-//        }
-//        xSemaphoreTake(arm_state_signal, portMAX_DELAY);
-//        xSemaphoreGive(arm_state_signal);  // Keep state ON
-
 		if (xSemaphoreTake(arm_state_signal, portMAX_DELAY) == pdTRUE) {
-//			xSemaphoreGive(arm_state_signal);
+			xSemaphoreGive(arm_state_signal);
 			// Play 8th notes (125ms duration) from a simple major scale sequence
-			playToneInterruptible(NOTE_C4, 125); // C
-//			delay_ms(10);
-			vTaskDelay(pdMS_TO_TICKS(10));      // 1ms chunk
-			playToneInterruptible(NOTE_D4, 125); // D
-//			delay_ms(10);
-			vTaskDelay(pdMS_TO_TICKS(10));      // 1ms chunk
-			playToneInterruptible(NOTE_E4, 125); // E
-//			delay_ms(10);
-			vTaskDelay(pdMS_TO_TICKS(10));      // 1ms chunk
-			playToneInterruptible(NOTE_C5, 125); // C (Higher) - Quarter note
+			playToneInterruptible(NOTE_C4, 50); // C
+			playToneInterruptible(0,1);
+			playToneInterruptible(NOTE_D4, 50); // D
+			playToneInterruptible(0,1);
+			playToneInterruptible(NOTE_E4, 50); // E
+			playToneInterruptible(0,1);
+			playToneInterruptible(NOTE_C5, 50); // C (Higher) - Quarter note
 
-//			delay_ms(100); // Short rest
+			playToneInterruptible(0,1);
 
-			playToneInterruptible(NOTE_G4, 125); // G
-//			delay_ms(10);
-			vTaskDelay(pdMS_TO_TICKS(10));      // 1ms chunk
-			playToneInterruptible(NOTE_E4, 125); // E
-//			delay_ms(10);
-			vTaskDelay(pdMS_TO_TICKS(10));      // 1ms chunk
-			playToneInterruptible(NOTE_C4, 125); // C (Low) - Dotted Quarter note
-			vTaskDelay(pdMS_TO_TICKS(10));      // 1ms chunk
-//			vTaskDelay(500);
+			playToneInterruptible(NOTE_G4, 50); // G
+			playToneInterruptible(0,1);
+			playToneInterruptible(NOTE_E4, 50); // E
+			playToneInterruptible(0,1);
+			playToneInterruptible(NOTE_C4, 50); // C (Low) - Dotted Quarter note
+			playToneInterruptible(0,1);
 		}
+		vTaskDelay(pdMS_TO_TICKS(50));      // 1ms chunk
 	}
 }
 // --- END: Added function to play a simple, high-pitched tune ---
@@ -710,7 +697,7 @@ int main(void) {
 
   initPWM(); // Initializes TPM0 for buzzer PWM
 
-  initADC();
+//  initADC();
 //  setPWM(LED, 0);  // Start with LED off
 //
 //  startADC(ADC_CHANNEL);  // Start continuous ADC conversion
