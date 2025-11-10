@@ -25,6 +25,7 @@
 
 SemaphoreHandle_t arm_state_signal; //Semaphore handling arm/disarmed
 SemaphoreHandle_t alarm_signal; //Semaphore handling LDR sensor
+SemaphoreHandle_t adcValueMutex; //Semaphore handling ADC conversion
 
 /* Initialize interrupts for SW2 and SW3 */
 
@@ -153,8 +154,8 @@ void PORTC_PORTD_IRQHandler() {
 	// Check that it is TILTSWITCH pressed
 	if (PORTC->ISFR & 1 << TILTSWITCH) {
 	  GPIOD->PSOR = (1 << INTERRUPTPIN);  // Toggle mode
-	  BaseType_t hpw;
-	  xSemaphoreGiveFromISR(arm_state_signal,&hpw);
+	  BaseType_t hpw = pdTRUE;
+	  xSemaphoreTakeFromISR(arm_state_signal, &hpw);
 	  portYIELD_FROM_ISR(hpw);
 	}
 	// Write a 1 to clear the ISFR bit
@@ -170,8 +171,8 @@ void PORTA_IRQHandler() {
   // Check that it is SW2 pressed
   if (PORTA->ISFR & 1 << SW3) {
 	  GPIOD->PCOR = (1 << INTERRUPTPIN);  // Toggle mode
-	  BaseType_t hpw;
-	  xSemaphoreTakeFromISR(arm_state_signal, &hpw);
+	  BaseType_t hpw = pdTRUE;
+	  xSemaphoreGiveFromISR(arm_state_signal,&hpw);
 	  portYIELD_FROM_ISR(hpw);
       // Clear interrupt flag correctly
       PORTA->PCR[SW3] |= PORT_PCR_ISF_MASK;
@@ -229,6 +230,7 @@ void setMCGIRClk() {
 
 }
 
+
 void setTPMClock(){
 
 	// Set MCGIRCLK
@@ -256,7 +258,7 @@ void delay_ms(uint32_t ms) {
 // Initialize PWM for the Buzzer on TPM0_CH2
 // TODO: Change this to utilise another clock (LDR using same timer for PWM is not good)
 
-void initPWM() {
+void initTPM0PWM() {
 
 	// Turn on clock gating to TPM0
 	SIM->SCGC6 |= SIM_SCGC6_TPM0_MASK;
@@ -326,21 +328,6 @@ void setBuzzerFrequency(uint32_t frequency_hz) {
 	TPM0->CONTROLS[2].CnV = duty_cycle_value;
 }
 
-//// Function to play a tone for a specific duration
-//void playToneInterruptible(uint32_t frequency_hz, uint32_t duration_ms) {
-//	// 1. Set the PWM frequency
-//	setBuzzerFrequency(frequency_hz);
-//
-//	// 2. Start the PWM if it's not already running
-//	startPWM();
-//
-//	// 3. Wait for the specified duration
-//	delay_ms(duration_ms);
-//
-//	// 4. Stop the tone by setting frequency to 0 (CnV=0)
-//	setBuzzerFrequency(0);
-//}
-
 
 ////Plays a tone that as an interruptible task.
 void playToneInterruptible(uint32_t freq, uint32_t duration_ms)
@@ -375,6 +362,7 @@ void playHappyTuneTask(void *P) {
 
 	while(1) {
 
+
 		if (xSemaphoreTake(arm_state_signal, portMAX_DELAY) == pdTRUE) {
 			xSemaphoreGive(arm_state_signal);
 			// Play 8th notes (125ms duration) from a simple major scale sequence
@@ -395,7 +383,7 @@ void playHappyTuneTask(void *P) {
 			playToneInterruptible(NOTE_C4, 50); // C (Low) - Dotted Quarter note
 			playToneInterruptible(0,1);
 		}
-		vTaskDelay(pdMS_TO_TICKS(50));      // 1ms chunk
+		vTaskDelay(pdMS_TO_TICKS(10));      // 1ms chunk
 	}
 }
 // --- END: Added function to play a simple, high-pitched tune ---
@@ -408,27 +396,28 @@ void playPoliceSirenTask() {
 	const int steps = 10; // number of steps from min to max frequency
 	int current_freq;
 
-	for (int i = 0; i < 4; i++) { // Repeat the wail cycle 4 times
-		// Wail UP (Low to High)
-		for (int j = 0; j <= steps; j++) {
-			// Linear interpolation of frequency
-			current_freq = NOTE_LOW_SIREN_START + j * (NOTE_HIGH_SIREN_END - NOTE_LOW_SIREN_START) / steps;
-			setBuzzerFrequency(current_freq);
-			startPWM(); // Ensure PWM is started for the smooth transition
-			delay_ms(delay_time);
-		}
+	while (1) {
+		//TODO: Change this to use alarm semaphore, test with arm for now.
+		if (xSemaphoreTake(arm_state_signal, portMAX_DELAY) == pdTRUE) {
+			xSemaphoreGive(arm_state_signal);
 
-		// Wail DOWN (High to Low)
-		for (int j = steps; j >= 0; j--) {
-			current_freq = NOTE_LOW_SIREN_START + j * (NOTE_HIGH_SIREN_END - NOTE_LOW_SIREN_START) / steps;
-			setBuzzerFrequency(current_freq);
-			startPWM();
-			delay_ms(delay_time);
+			for (int i = 0; i < 2; i++) { // Repeat the wail cycle 4 times
+				// Wail UP (Low to High)
+				for (int j = 0; j <= steps; j++) {
+					// Linear interpolation of frequency
+					current_freq = NOTE_LOW_SIREN_START + j * (NOTE_HIGH_SIREN_END - NOTE_LOW_SIREN_START) / steps;
+					playToneInterruptible(current_freq, delay_time);
+				}
+
+				// Wail DOWN (High to Low)
+				for (int j = steps; j >= 0; j--) {
+					current_freq = NOTE_LOW_SIREN_START + j * (NOTE_HIGH_SIREN_END - NOTE_LOW_SIREN_START) / steps;
+					playToneInterruptible(current_freq, delay_time);
+				}
+			}
 		}
+		vTaskDelay(pdMS_TO_TICKS(100));
 	}
-	// Stop the sound completely after the wail sequence finishes
-	setBuzzerFrequency(0);
-
 }
 // --- END: Added function to play a sad/police siren wailing tone ---
 
@@ -438,7 +427,7 @@ void playPoliceSirenTask() {
 #define DEBUG_CONSOLE_BAUD_RATE 9600
 
 /* Pin Definitions */
-#define LED_PIN     30 // PTE30 - TPM0_CH3
+#define LED_PIN     21 // PTE21 - TPM1_CH1
 #define LDR_PIN     20 // PTE20 - ADC0_SE0
 #define ADC_CHANNEL 0
 
@@ -452,93 +441,65 @@ typedef enum {
     LED
 } TDEVICE;
 
-volatile int adcValue = 0;
+volatile uint16_t adcValue = 0;
 volatile int newDataReady = 0;
 volatile float filteredAdcValue = 0.0f; // Stores the smoothed ADC value
 
-//void setMCGIRClk() {
-//    MCG->C1 &= ~MCG_C1_CLKS_MASK;
-//    // Choose MCG clock source of 01 for LIRC and enable IRCLKEN
-//    MCG->C1 |= ((MCG_C1_CLKS(0b01) | MCG_C1_IRCLKEN_MASK));
-//
-//    // Set IRCS to 1 to choose 8 MHz clock
-//    MCG->C2 |= MCG_C2_IRCS_MASK;
-//
-//    // Choose FCRDIV of 0 for divisor of 1
-//    MCG->SC &= ~MCG_SC_FCRDIV_MASK;
-//    MCG->SC |= MCG_SC_FCRDIV(0b0);
-//
-//    // Choose LIRC_DIV2 of 0 for divisor of 1
-//    MCG->MC &= ~MCG_MC_LIRC_DIV2_MASK;
-//    MCG->MC |= MCG_MC_LIRC_DIV2(0b0);
-//}
-//
-///**
-// * Set TPM Clock Source to MCGIRCLK (8 MHz)
-// */
-//void setTPMClock(){
-//    setMCGIRClk();
-//
-//    // Choose MCGIRCLK (8 MHz) as TPM clock source
-//    SIM->SOPT2 &= ~SIM_SOPT2_TPMSRC_MASK;
-//    SIM->SOPT2 |= SIM_SOPT2_TPMSRC(0b11);
-//}
-//
 ///**
 // * Initialize PWM for LED control on PTE30
-// * LED connected to: PTE30 TPM0 CH3 ALT3
+// * LED connected to: PTE21 TPM1 CH0 ALT3
 // * TODO: Change this to utilise another clock.
 // */
-//void initPWM() {
-//    // Turn on clock gating to TPM0
-//    SIM->SCGC6 |= SIM_SCGC6_TPM0_MASK;
-//
-//    // Turn on clock gating to Port E
-//    SIM->SCGC5 |= SIM_SCGC5_PORTE_MASK;
-//
-//    // Set the pin multiplexor for PWM
-//    PORTE->PCR[LED_PIN] &= ~PORT_PCR_MUX_MASK;
-//    PORTE->PCR[LED_PIN] |= PORT_PCR_MUX(0b11);  // ALT3 for TPM0_CH3
-//
-//    // Set pin to output
-//    GPIOE->PDDR |= (1 << LED_PIN);
-//
-//    // Set up TPM0
-//    // Turn off TPM0 and clear the prescalar field
-//    TPM0->SC &= ~(TPM_SC_CMOD_MASK | TPM_SC_PS_MASK);
-//
-//    // Set prescalar of 128
-//    TPM0->SC |= TPM_SC_PS(0b111);
-//
-//    // Select centre-aligned PWM mode
-//    TPM0->SC |= TPM_SC_CPWMS_MASK;
-//
-//    // Initialize count to 0
-//    TPM0->CNT = 0;
-//
-//    // PWM frequency = 8 MHz / 128 = 62500 Hz
-//    // For 500Hz PWM: MOD = 62500/500 = 125
-//    TPM0->MOD = 125;
-//
-//    // Configure Channel 3 for LED
-//    // MS=10, ELS=01 (Reverse PWM - LED is active low)
-//    TPM0->CONTROLS[3].CnSC &= ~(TPM_CnSC_MSA_MASK | TPM_CnSC_ELSB_MASK);
-//    TPM0->CONTROLS[3].CnSC |= (TPM_CnSC_MSB(1) | TPM_CnSC_ELSA(1));
-//}
-//
+void initTPM1PWM() {
+    // Turn on clock gating to TPM0
+    SIM->SCGC6 |= SIM_SCGC6_TPM1_MASK;
+
+    // Turn on clock gating to Port E
+    SIM->SCGC5 |= SIM_SCGC5_PORTE_MASK;
+
+    // Set the pin multiplexor for PWM
+    PORTE->PCR[LED_PIN] &= ~PORT_PCR_MUX_MASK;
+    PORTE->PCR[LED_PIN] |= PORT_PCR_MUX(0b11);  // ALT3 for TPM1_CH1
+
+    // Set pin to output
+    GPIOE->PDDR |= (1 << LED_PIN);
+
+    // Set up TPM1
+    // Turn off TPM1 and clear the prescalar field
+    TPM1->SC &= ~(TPM_SC_CMOD_MASK | TPM_SC_PS_MASK);
+
+    // Set prescalar of 128
+    TPM1->SC |= TPM_SC_PS(0b111);
+
+    // Select centre-aligned PWM mode
+    TPM1->SC |= TPM_SC_CPWMS_MASK;
+
+    // Initialize count to 0
+    TPM1->CNT = 0;
+
+    // PWM frequency = 8 MHz / 128 = 62500 Hz
+    // For 500Hz PWM: MOD = 62500/500 = 125
+    TPM1->MOD = 125;
+
+    // Configure Channel 1 for LED
+    // MS=10, ELS=01 (Reverse PWM - LED is active low)
+    TPM1->CONTROLS[1].CnSC &= ~(TPM_CnSC_MSA_MASK | TPM_CnSC_ELSB_MASK);
+    TPM1->CONTROLS[1].CnSC |= (TPM_CnSC_MSB(1) | TPM_CnSC_ELSA(1));
+}
+
 ///**
 // * Start PWM operation
 // */
-//void startPWM() {
-//    TPM0->SC |= TPM_SC_CMOD(0b01);
-//}
-//
+void startLEDPWM() {
+    TPM1->SC |= TPM_SC_CMOD(0b01);
+}
+
 ///**
 // * Stop PWM operation
 // */
-//void stopPWM() {
-//    TPM0->SC &= ~TPM_SC_CMOD_MASK;
-//}
+void stopLEDPWM() {
+    TPM1->SC &= ~TPM_SC_CMOD_MASK;
+}
 
 /**
  * Set PWM duty cycle (brightness)
@@ -550,11 +511,11 @@ void setPWM(int device, int percent) {
     if (percent < 0) percent = 0;
     if (percent > 100) percent = 100;
 
-    int value = (int)((percent / 100.0) * (double) TPM0->MOD);
+    int value = (int)((percent / 100.0) * (double) TPM1->MOD);
 
     switch(device){
         case LED:
-            TPM0->CONTROLS[3].CnV = value;
+            TPM1->CONTROLS[1].CnV = value;
             break;
         default:
             PRINTF("Invalid device.\r\n");
@@ -603,39 +564,62 @@ void initADC() {
     ADC0->SC3 &= ~ADC_SC3_AVGE_MASK;
     ADC0->SC3 |= ADC_SC3_AVGE(0);
 
-    // Use continuous conversion mode
+    // Do NOT use continuous conversion mode; we poll this
     ADC0->SC3 &= ~ADC_SC3_ADCO_MASK;
-    ADC0->SC3 |= ADC_SC3_ADCO(1);  // Continuous conversion
+    ADC0->SC1[0] &= ~ADC_SC1_AIEN_MASK;
+//    ADC0->SC3 |= ADC_SC3_ADCO(1);  // Continuous conversion
 
-    // Set interrupt priority (lowest)
-    NVIC_SetPriority(ADC0_IRQn, 192);
-    NVIC_EnableIRQ(ADC0_IRQn);
+//    // Set interrupt priority (lowest)
+//    NVIC_SetPriority(ADC0_IRQn, 192);
+//    NVIC_EnableIRQ(ADC0_IRQn);
 
-  //  PRINTF("ADC initialized for continuous conversion\r\n");
 }
 
-/**
- * Start ADC conversion on specified channel
- * @param channel: ADC channel number (0 for PTE20)
- */
-void startADC(int channel) {
-    PRINTF("Started ADC on channel %d\r\n", channel);
+///**
+// * Start ADC conversion on specified channel
+// * @param channel: ADC channel number (0 for PTE20)
+// */
+//void startADC(int channel) {
+////    PRINTF("Started ADC on channel %d\r\n", channel);
+//
+//    // Select channel and start conversion
+//    ADC0->SC1[0] &= ~ADC_SC1_ADCH_MASK;
+//    ADC0->SC1[0] |= ADC_SC1_ADCH(channel);
+//}
 
-    // Select channel and start conversion
-    ADC0->SC1[0] &= ~ADC_SC1_ADCH_MASK;
-    ADC0->SC1[0] |= ADC_SC1_ADCH(channel);
+/*
+ * Read the ADC values manually from the channel
+ */
+uint16_t readADC(int channel) {
+    ADC0->SC1[0] = channel & ADC_SC1_ADCH_MASK;   // start conversion
+
+    while (!(ADC0->SC1[0] & ADC_SC1_COCO_MASK)) { } // wait until you get the value
+
+    return ADC0->R[0];
 }
 
-/**
- * ADC Interrupt Handler
- * Called automatically when ADC conversion completes
- */
-void ADC0_IRQHandler() {
-    NVIC_ClearPendingIRQ(ADC0_IRQn);
+static void convertADCTask(void *p) {
+    while (1) {
+        uint16_t newValue = readADC(ADC_CHANNEL);
 
-    if(ADC0->SC1[0] & ADC_SC1_COCO_MASK){
-        adcValue = ADC0->R[0]; // Read the new ADC value (0-4095)
+        // store safely using mutex
+        xSemaphoreTake(adcValueMutex, portMAX_DELAY);
+        adcValue = newValue;
+        xSemaphoreGive(adcValueMutex);
 
+        vTaskDelay(pdMS_TO_TICKS(10));  // sample every 10 ms (100 Hz)
+    }
+}
+
+static void setPWMTask(void *p) {
+	uint16_t currentValue;
+	while (1){
+		xSemaphoreTake(adcValueMutex, portMAX_DELAY);
+		currentValue = adcValue;
+		xSemaphoreGive(adcValueMutex);
+
+
+		//TODO: Add adc smoothening here
         // Apply Exponential Moving Average (EMA) filter
         if (filteredAdcValue == 0.0f) {
             // Initial state: set filter value to the first reading
@@ -656,18 +640,11 @@ void ADC0_IRQHandler() {
         // Light Meter Function: Bright LDR light -> BRIGHT LED (low CnV value)
         int invertedAdc = MAX_ADC_VALUE - (int)filteredAdcValue;
         int brightness = (int)(((float)invertedAdc / (float)MAX_ADC_VALUE) * 100.0f);
+		setPWM(LED, brightness);
 
-        // Set LED brightness using the smoothed percentage
-        setPWM(LED, brightness);
-    }
+		vTaskDelay(pdMS_TO_TICKS(10)); // update at same rate
+	}
 }
-
-//static void convertADCTask(*p) {
-//	//TODO: Refactor to make ADC conversion into a task (from IRQ)
-//}
-//
-//static void setPWMTask(*p) {
-//	//TODO: Refactor to make setting PWM a task
 //}
 
 int main(void) {
@@ -693,18 +670,21 @@ int main(void) {
 
   // Set the TPM clock
   setTPMClock();
-  // initTimer() is NOT called as we don't need the TPM1 interrupt for fading.
 
-  initPWM(); // Initializes TPM0 for buzzer PWM
+  initTPM0PWM(); // Initializes TPM0 for buzzer PWM
+  initTPM1PWM(); //Initialilzes TPM1 for LED PWM
 
-//  initADC();
-//  setPWM(LED, 0);  // Start with LED off
-//
-//  startADC(ADC_CHANNEL);  // Start continuous ADC conversion
+  initADC();
+  setPWM(LED, 0);  // Start with LED off
+  startLEDPWM();  //Start LED PWM channel
 
-  arm_state_signal = xSemaphoreCreateBinary();
+  arm_state_signal = xSemaphoreCreateMutex(); //Create mutex for arming
+  adcValueMutex = xSemaphoreCreateMutex();	//Create mutex for ADC conversion
   xTaskCreate(playHappyTuneTask, "task_happy", configMINIMAL_STACK_SIZE+100, NULL, 2, NULL);
-//  xTaskCreate(playPoliceSirenTask, "task_alert", configMINIMAL_STACK_SIZE+100, NULL, 3, NULL);
+//  xTaskCreate(playPoliceSirenTask, "task_alert", configMINIMAL_STACK_SIZE+100, NULL, 1, NULL);
+  xTaskCreate(convertADCTask, "task_adc", configMINIMAL_STACK_SIZE+100, NULL, 1, NULL);
+  xTaskCreate(setPWMTask, "task_ledpwm", configMINIMAL_STACK_SIZE+100, NULL, 3, NULL);
+
   vTaskStartScheduler();
 
   /* Force the counter to be placed into memory. */
