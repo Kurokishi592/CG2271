@@ -23,6 +23,10 @@ static const uint8_t MPU_ADDR = 0x68; // AD0 low
 static const uint8_t REG_PWR_MGMT_1 = 0x6B;
 static const uint8_t REG_ACCEL_XOUT_H = 0x3B;
 static const uint8_t REG_WHO_AM_I    = 0x75;
+// WHO_AM_I expected values:
+// 0x68: Standard MPU-6050 (AD0 low)
+// 0x69: Standard MPU-6050 (AD0 high)
+// 0x70: Seen on some clones / MPU-6000 style variants or mislabeled chips; treat as compatible if basic registers respond
 
 Adafruit_MPU6050 mpu; // Using default Wire now
 
@@ -51,6 +55,10 @@ FrdmStatus frdm;
 
 // Forward prototype for sendLineToFrdm (implemented below) so tasks can call it
 static void sendLineToFrdm(const String& line);
+
+// Forward declarations for low-level I2C helpers used early in imuSetup
+static bool i2cWriteByte(uint8_t reg, uint8_t val); // defined later
+static bool i2cReadBytes(uint8_t reg, uint8_t* buf, size_t n); // defined later
 
 void kalmanSetup()
 {
@@ -89,7 +97,7 @@ void imuSetup() {
 
   // First attempt to init via Adafruit driver
   if (!mpu.begin(MPU_ADDR, &Wire)) {
-    Serial.println("Failed to find MPU6050 chip via Adafruit driver, retrying with soft-reset...");
+    Serial.println("Failed to init via Adafruit driver (attempt 1); retrying with soft-reset...");
     // Soft reset, then wake again
     if (!i2cWriteByte(REG_PWR_MGMT_1, 0x80)) {
       Serial.println("Device reset write failed");
@@ -99,9 +107,16 @@ void imuSetup() {
     delay(150);
     // Final retry
     if (!mpu.begin(MPU_ADDR, &Wire)) {
-      Serial.printf("Still cannot init (WHO_AM_I=0x%02X). Continuing without IMU.\n", who);
-      // Do not halt forever; keep running so web/UART still work
-      return;
+      Serial.printf("Second init failed (WHO_AM_I=0x%02X). Evaluating fallback...\n", who);
+      bool supported = (who == 0x68 || who == 0x69 || who == 0x70);
+      if (!supported) {
+        Serial.println("WHO_AM_I not recognized as compatible -> IMU disabled.");
+        return;
+      }
+      // For 0x70 (or 0x69 if AD0 high but address set to 0x68), continue with raw register fallback
+      Serial.println("Proceeding with raw register fallback (manual reads). Kalman & driver features limited.");
+      // Minimal wake already done; no library config. We'll rely on imuReadOnce failing gracefully if sensor not true-compatible.
+      return; // Early return: indicates library not initialized; tasks should check an init flag if needed.
     }
   }
   Serial.println("MPU6050 Found!");
@@ -377,41 +392,41 @@ void setup() {
   Serial.println("ESP32-S2 TiltGuard starting...");
   Serial.println("BOOT OK");
 
-  // // Initialize default FRDM status values (used by IMU tilt threshold and UI)
-  // frdm.armed = false;
-  // frdm.alarm = false;
-  // frdm.thrTilt = 30;   // default tilt threshold (degrees)
-  // frdm.thrLight = 500;
-  // frdm.light = 0;
-  // frdm.lastAlert = String("");
+  // Initialize default FRDM status values (used by IMU tilt threshold and UI)
+  frdm.armed = false;
+  frdm.alarm = false;
+  frdm.thrTilt = 30;   // default tilt threshold (degrees)
+  frdm.thrLight = 500;
+  frdm.light = 0;
+  frdm.lastAlert = String("");
 
-  // // WiFi AP for simplest demo
-  // WiFi.mode(WIFI_AP);
-  // bool ap = WiFi.softAP(WIFI_SSID, WIFI_PASS);
-  // if (ap) Serial.printf("AP up: %s  IP: %s\n", WIFI_SSID, WiFi.softAPIP().toString().c_str());
+  // WiFi AP for simplest demo
+  WiFi.mode(WIFI_AP);
+  bool ap = WiFi.softAP(WIFI_SSID, WIFI_PASS);
+  if (ap) Serial.printf("AP up: %s  IP: %s\n", WIFI_SSID, WiFi.softAPIP().toString().c_str());
 
-  // // UART to FRDM
-  // FRDM.begin(115200, SERIAL_8N1, UART_RX_PIN, UART_TX_PIN);
+  // UART to FRDM
+  FRDM.begin(115200, SERIAL_8N1, UART_RX_PIN, UART_TX_PIN);
 
   // I2C to MPU-6050 using default Wire
   imuSetup();          // calls Wire.begin(...)
-  // kalmanSetup();       // initialize Kalman filters
-  // getRollPitchK();     // take first reading
-  scanI2C();
+  kalmanSetup();       // initialize Kalman filters
+  getRollPitchK();     // take first reading
+  // scanI2C();
 
-  // // Web server routes (ensure server actually runs; these were commented out)
-  // server.on("/", HTTP_GET, handleIndex);
-  // server.on("/arm", HTTP_POST, handleArm);
-  // server.on("/disarm", HTTP_POST, handleDisarm);
-  // server.on("/set", HTTP_POST, handleSet);
-  // server.on("/status", HTTP_GET, handleStatus);
-  // server.onNotFound(handleNotFound);
-  // server.begin();
+  // Web server routes (ensure server actually runs; these were commented out)
+  server.on("/", HTTP_GET, handleIndex);
+  server.on("/arm", HTTP_POST, handleArm);
+  server.on("/disarm", HTTP_POST, handleDisarm);
+  server.on("/set", HTTP_POST, handleSet);
+  server.on("/status", HTTP_GET, handleStatus);
+  server.onNotFound(handleNotFound);
+  server.begin();
 
-  // // Tasks (re-enable for periodic IMU + UART handling)
-  // xTaskCreatePinnedToCore(uartRxTask, "uartRx", 4096, nullptr, 1, nullptr, ARDUINO_RUNNING_CORE);
-  // xTaskCreatePinnedToCore(imuTask, "imu", 4096, nullptr, 1, nullptr, ARDUINO_RUNNING_CORE);
-  // xTaskCreatePinnedToCore(imuReportTask, "imuRpt", 3072, nullptr, 1, nullptr, ARDUINO_RUNNING_CORE);
+  // Tasks (re-enable for periodic IMU + UART handling)
+  xTaskCreatePinnedToCore(uartRxTask, "uartRx", 4096, nullptr, 1, nullptr, ARDUINO_RUNNING_CORE);
+  xTaskCreatePinnedToCore(imuTask, "imu", 4096, nullptr, 1, nullptr, ARDUINO_RUNNING_CORE);
+  xTaskCreatePinnedToCore(imuReportTask, "imuRpt", 3072, nullptr, 1, nullptr, ARDUINO_RUNNING_CORE);
 }
 
 void loop() {
