@@ -89,7 +89,7 @@ void initSW3Interrupt() {
   NVIC_EnableIRQ(PORTA_IRQn);
 }
 
-// TILTSWITCH is connected to PTC3
+// TILTSWITCH is connected to PTC5
 void initTILTSWITCHInterrupt() {
   // Enable clock for PORTC
   SIM->SCGC5 |= SIM_SCGC5_PORTC_MASK;
@@ -110,9 +110,9 @@ void initTILTSWITCHInterrupt() {
   // Set as input
   GPIOC->PDDR &= ~(1 << TILTSWITCH);
 
-  // Configure interrupt for falling edge
+  // Configure interrupt for EITHER edge (rising OR falling) to catch tilt switches better
   PORTC->PCR[TILTSWITCH] &= ~PORT_PCR_IRQC_MASK;
-  PORTC->PCR[TILTSWITCH] |= PORT_PCR_IRQC(0b1001);
+  PORTC->PCR[TILTSWITCH] |= PORT_PCR_IRQC(0b1011);  // 0b1011 = interrupt on either edge
 
   // Set NVIC priority to the lowest (192)
   NVIC_SetPriority(PORTC_PORTD_IRQn, 192);
@@ -124,21 +124,22 @@ void initTILTSWITCHInterrupt() {
   NVIC_EnableIRQ(PORTC_PORTD_IRQn);
 }
 
-// TILTSWITCH IRQHandler.  TILTSWITCH switches on the red LED
+// TILTSWITCH IRQHandler.  TILTSWITCH TOGGLES the LED
 void PORTC_PORTD_IRQHandler() {
   // Clear pending IRQ for PORTC
 	NVIC_ClearPendingIRQ(PORTC_PORTD_IRQn);
 
 	// Check that it is TILTSWITCH pressed
-	if (PORTC->ISFR & 1 << TILTSWITCH) {
-	  GPIOD->PSOR = (1 << INTERRUPTPIN);  // Toggle mode
-	  BaseType_t hpw = pdTRUE;
+	if (PORTC->ISFR & (1 << TILTSWITCH)) {
+	  GPIOD->PTOR = (1 << INTERRUPTPIN);  // TOGGLE the LED (use PTOR not PSOR)
+	  PRINTF("TILT DETECTED!\r\n");  // Debug print
+	  BaseType_t hpw = pdFALSE;
 	  xSemaphoreTakeFromISR(arm_state_signal, &hpw);
 	  xSemaphoreTakeFromISR(alarm_signal, &hpw);
-//	  portYIELD_FROM_ISR(hpw);
+	  portYIELD_FROM_ISR(hpw);
 	}
 	// Write a 1 to clear the ISFR bit
-	PORTC->ISFR |= (1 << TILTSWITCH);
+	PORTC->ISFR = (1 << TILTSWITCH);  // Clear only this pin's flag
 }
 
 
