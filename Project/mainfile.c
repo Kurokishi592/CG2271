@@ -10,6 +10,7 @@
  * @brief   Application entry point.
  */
 #include <stdio.h>
+#include <string.h>
 #include "board.h"
 #include "peripherals.h"
 #include "pin_mux.h"
@@ -21,25 +22,78 @@
 #include "FreeRTOS.h"
 #include "semphr.h"
 #include "task.h"
+#include "queue.h"
 
 QueueHandle_t dataQueue; //queue for ADC
 
 SemaphoreHandle_t alarm_signal; //Semaphore handling alarm is triggered
 SemaphoreHandle_t disarm_signal; //Semaphore handling disarm is triggered
 
-typedef enum {
-    DISARM = 0,
-	ALARM = 1
-} SystemState_t;
-
-volatile SystemState_t systemState = DISARM;   // shared state
 static volatile BaseType_t stopFlag = 0;   // shared state
 
 static TaskHandle_t taskHappyHandle = NULL;
 static TaskHandle_t taskAlarmHandle = NULL;
 
 
-// ================= UART STUFF ==================
+QueueHandle_t dataQueue; // Renamed from dataQueue, queue for ADC
+SemaphoreHandle_t arm_state_signal; // Semaphore handling arm/disarmed (used as a mutex/binary sem)
+SemaphoreHandle_t alarm_signal; // Semaphore handling LDR sensor (used as a binary sem)
+// SemaphoreHandle_t adcValueMutex; // Not needed with queue
+SemaphoreHandle_t systemStateMutex;
+// Global structure to hold the current system state for UART transmission
+typedef struct {
+  uint8_t isArmed;    // Interpreted as Alarm Enabled (from ESP32 ALARM_ON/OFF)
+  uint8_t isAlarming; // 1 when siren is active (e.g., LDR over threshold or IMU_TILT=1 while enabled)
+} SystemState_t;
+
+volatile SystemState_t currentState = {0, 0}; // Initialize: Disarmed, Not Alarming
+
+// Buzzer is connected to PTE29, which corresponds to TPM0_CH2 (originally Blue LED pin)
+#define BUZZER_PIN	29	// PTE29 (TPM0_CH2)
+
+// Base clock frequency for TPM0, assuming 8MHz LIRC clock and a prescaler of 128 (0x7)
+// Input Clock Freq = 8,000,000 Hz / 128 = 62,500 Hz
+#define TPM0_INPUT_CLOCK_HZ 62500U
+
+// --- START: Added Note Frequencies for Tunes ---
+// Defines for common musical notes (A4 = 440Hz standard)
+// These frequencies allow us to play recognizable melodies.
+#define NOTE_C4 262
+#define NOTE_D4 294
+#define NOTE_E4 330
+#define NOTE_F4 349
+#define NOTE_G4 392
+#define NOTE_A4 440
+#define NOTE_B4 494
+#define NOTE_C5 523
+#define NOTE_LOW_SIREN_START 220
+#define NOTE_HIGH_SIREN_END 330
+
+// ADC Section For LDR
+
+// Define the baud rate for the debug console
+#define DEBUG_CONSOLE_BAUD_RATE 9600
+
+/* Pin Definitions */
+#define LED_PIN     21 // PTE21 - TPM1_CH1
+#define LDR_PIN     20 // PTE20 - ADC0_SE0
+#define ADC_CHANNEL 0
+
+// Define the maximum ADC reading value (12-bit conversion)
+#define MAX_ADC_VALUE 4095
+
+// Define the EMA smoothing factor (Alpha). Closer to 0 for more smoothing.
+#define SMOOTHING_ALPHA 0.08f
+
+typedef enum {
+    LED
+} TDEVICE;
+
+volatile uint16_t adcValue = 0;
+volatile int newDataReady = 0;
+volatile float filteredAdcValue = 0.0f; // Stores the smoothed ADC value
+volatile uint16_t ADC_THRESHOLD = 200; //default threshold
+
 #define BAUD_RATE 9600
 #define UART_TX_PTE22 	22
 #define UART_RX_PTE23 	23
@@ -48,7 +102,6 @@ static TaskHandle_t taskAlarmHandle = NULL;
 void initUART2(uint32_t baud_rate)
 {
 	NVIC_DisableIRQ(UART2_FLEXIO_IRQn);
-
 	//enable clock to UART2 and PORTE
 	SIM->SCGC4 |= SIM_SCGC4_UART2_MASK;
 	SIM->SCGC5 |= SIM_SCGC5_PORTE_MASK;
@@ -94,7 +147,6 @@ void initUART2(uint32_t baud_rate)
 	NVIC_SetPriority(UART2_FLEXIO_IRQn, UART2_INT_PRIO);
 	NVIC_ClearPendingIRQ(UART2_FLEXIO_IRQn);
 	NVIC_EnableIRQ(UART2_FLEXIO_IRQn);
-
 }
 
 #define MAX_MSG_LEN		256
@@ -145,7 +197,6 @@ void UART2_FLEXIO_IRQHandler(void)
 			recv_ptr = 0;
 		}
 	}
-
 }
 
 void sendMessage(char *message) {
@@ -162,21 +213,74 @@ static void recvTask(void *p) {
 	while(1) {
 		TMessage msg;
 		if(xQueueReceive(queue, (TMessage *) &msg, portMAX_DELAY) == pdTRUE) {
-			PRINTF("Received message: %s\r\n", msg.message);
+      // Trim CRLF
+      char *line = msg.message;
+      size_t n = strlen(line);
+      while (n && (line[n-1] == '\r' || line[n-1] == '\n')) { line[--n] = '\0'; }
+
+      // Handle commands from ESP32 (bare-metal friendly, short ASCII):
+      // ALARM_ON | ALARM_OFF | TH_LIGHT=NNN | IMU_TILT=0|1
+      if (strncmp(line, "ALARM_ON", 8) == 0) {
+        if (xSemaphoreTake(systemStateMutex, portMAX_DELAY) == pdTRUE) {
+          currentState.isArmed = 1;   // alarm enabled
+          // Clearing active siren state is optional; keep as-is
+          xSemaphoreGive(systemStateMutex);
+        }
+        // Optionally play a small tune or LED indication via arm_state_signal
+        xSemaphoreGive(arm_state_signal);
+      } else if (strncmp(line, "ALARM_OFF", 9) == 0) {
+        if (xSemaphoreTake(systemStateMutex, portMAX_DELAY) == pdTRUE) {
+          currentState.isArmed = 0;   // alarm disabled
+          currentState.isAlarming = 0; // stop siren state
+          xSemaphoreGive(systemStateMutex);
+        }
+        // Signal tasks to wind down
+        xSemaphoreGive(arm_state_signal);
+        xSemaphoreGive(alarm_signal);
+      } else if (strncmp(line, "TH_LIGHT=", 9) == 0) {
+        // Parse numeric threshold
+        const char *p = line + 9; unsigned val = 0;
+        while (*p >= '0' && *p <= '9') { val = val*10 + (unsigned)(*p - '0'); p++; }
+        ADC_THRESHOLD = (uint16_t)val;
+      } else if (strncmp(line, "IMU_TILT=", 9) == 0) {
+        // Parse 0 or 1
+        int tilt = (line[9] == '1') ? 1 : 0;
+        // If alarm is enabled and tilt asserted, activate siren
+        if (tilt) {
+          BaseType_t armed = 0;
+          if (xSemaphoreTake(systemStateMutex, portMAX_DELAY) == pdTRUE) {
+            armed = currentState.isArmed;
+            if (armed) currentState.isAlarming = 1;
+            xSemaphoreGive(systemStateMutex);
+          }
+          if (armed) xSemaphoreGive(alarm_signal);
+        }
+      }
 		}
 	}
 }
 
 static void sendTask(void *p) {
-	int count=0;
-	char buffer[MAX_MSG_LEN];
-	while(1) {
-		sprintf(buffer, "This is message %d\n", count++);
-		sendMessage(buffer);
-		vTaskDelay(pdMS_TO_TICKS(2000));
-	}
-}
+  char buffer[MAX_MSG_LEN];
+  while(1) {
+    uint8_t alarm_enabled = 0;
+    uint16_t light_val = 0;
 
+    // Safely read global state
+    if (xSemaphoreTake(systemStateMutex, portMAX_DELAY) == pdTRUE) {
+      alarm_enabled = currentState.isArmed; // treated as alarm on/off
+      xSemaphoreGive(systemStateMutex);
+    }
+
+    light_val = adcValue; // raw ADC reading is fine for STATUS
+
+    // Format the STATUS line expected by ESP32: STATUS alarm=<0|1> light=<value>\n
+    snprintf(buffer, sizeof(buffer), "STATUS alarm=%u light=%u\n", (unsigned)alarm_enabled, (unsigned)light_val);
+
+    sendMessage(buffer);
+    vTaskDelay(pdMS_TO_TICKS(500)); // ~2 Hz via ESP poll; 500ms is OK
+  }
+}
 
 /* Initialize interrupts for SW2 and SW3 */
 
@@ -303,7 +407,7 @@ void PORTA_IRQHandler() {
 	  xSemaphoreGiveFromISR(disarm_signal, &hpw);
 	  portYIELD_FROM_ISR(hpw);
       // Clear interrupt flag correctly
-      PORTA->PCR[SW3] |= PORT_PCR_ISF_MASK;
+//      PORTA->PCR[SW3] |= PORT_PCR_ISF_MASK;
   }
     // Write a 1 to clear the ISFR bit
     PORTA->ISFR |= (1 << SW3);
@@ -315,19 +419,22 @@ void stateControllerTask(void *p) {
     	if (xSemaphoreTake(alarm_signal, portMAX_DELAY) == pdTRUE) {
             // Toggle the logical state (persistent memory)
             taskENTER_CRITICAL();     // ensures atomicity
-            systemState = ALARM;
-            taskEXIT_CRITICAL();
+            currentState.isAlarming = 1;
+            currentState.isArmed = 0;
             stopFlag = 1;
+            taskEXIT_CRITICAL();
             // Wake the relevant task
             xTaskNotify(taskHappyHandle, 0, eNoAction);
             xTaskNotify(taskAlarmHandle, 0, eNoAction);
 
-        } else if (xSemaphoreTake(disarm_signal, portMAX_DELAY) == pdTRUE) {
+    	}
+    	if (xSemaphoreTake(disarm_signal, portMAX_DELAY) == pdTRUE) {
             // Toggle the logical state (persistent memory)
             taskENTER_CRITICAL();     // ensures atomicity
-            systemState = DISARM;
-            taskEXIT_CRITICAL();
+            currentState.isAlarming = 0;
+            currentState.isArmed = 1;
             stopFlag = 1;
+            taskEXIT_CRITICAL();
 
             // Wake the relevant task
             xTaskNotify(taskHappyHandle, 0, eNoAction);
@@ -340,26 +447,6 @@ void stateControllerTask(void *p) {
 
 //BUZZER CODE SECTION
 
-// Buzzer is connected to PTE29, which corresponds to TPM0_CH2 (originally Blue LED pin)
-#define BUZZER_PIN	29	// PTE29 (TPM0_CH2)
-
-// Base clock frequency for TPM0, assuming 8MHz LIRC clock and a prescaler of 128 (0x7)
-// Input Clock Freq = 8,000,000 Hz / 128 = 62,500 Hz
-#define TPM0_INPUT_CLOCK_HZ 62500U
-
-// --- START: Added Note Frequencies for Tunes ---
-// Defines for common musical notes (A4 = 440Hz standard)
-// These frequencies allow us to play recognizable melodies.
-#define NOTE_C4 262
-#define NOTE_D4 294
-#define NOTE_E4 330
-#define NOTE_F4 349
-#define NOTE_G4 392
-#define NOTE_A4 440
-#define NOTE_B4 494
-#define NOTE_C5 523
-#define NOTE_LOW_SIREN_START 220
-#define NOTE_HIGH_SIREN_END 330
 
 
 
@@ -499,13 +586,11 @@ void playToneInterruptible(uint32_t freq, uint32_t duration_ms)
     while (elapsed < duration_ms)
     {
         // Check if state was turned off
-        if(stopFlag)
+        if (stopFlag)
         {
         	setBuzzerFrequency(0);
             return; // Immediate exit
         }
-
-//        xSemaphoreGive(alarm_signal);  // keep semaphore ON
         delay_ms(1); //it exists so therefore it does
         elapsed++;
     }
@@ -515,11 +600,11 @@ void playToneInterruptible(uint32_t freq, uint32_t duration_ms)
     return;
 }
 // --- START: Added function to play a simple, high-pitched tune ---
-void playHappyTuneTask(void *P) {
-	SystemState_t currentState;
+void playHappyTuneTask(void *p) {
+	SystemState_t currState;
 	while(1) {
-		currentState = systemState;
-		if (currentState == DISARM) {
+		currState = currentState;
+		if (currState.isArmed == 1) {
 			// Play 8th notes (125ms duration) from a simple major scale sequence
 			stopFlag = 0;
 			playToneInterruptible(NOTE_C4, 50); // C
@@ -554,11 +639,11 @@ void playPoliceSirenTask() {
 	const int delay_time = 5; // milliseconds of delay for each step
 	const int steps = 10; // number of steps from min to max frequency
 	int current_freq;
-	SystemState_t currentState;
+	SystemState_t currState;
 
 	while (1) {
-		currentState = systemState;
-		if (currentState == ALARM) {
+		currState = currentState;
+		if (currState.isAlarming == 1) {
 			stopFlag = 0;
 			for (int i = 0; i < 2; i++) { // Repeat the wail cycle 4 times
 				// Wail UP (Low to High)
@@ -581,31 +666,6 @@ void playPoliceSirenTask() {
 	}
 }
 // --- END: Added function to play a sad/police siren wailing tone ---
-
-// ADC Section For LDR
-
-// Define the baud rate for the debug console
-#define DEBUG_CONSOLE_BAUD_RATE 9600
-
-/* Pin Definitions */
-#define LED_PIN     21 // PTE21 - TPM1_CH1
-#define LDR_PIN     20 // PTE20 - ADC0_SE0
-#define ADC_CHANNEL 0
-
-// Define the maximum ADC reading value (12-bit conversion)
-#define MAX_ADC_VALUE 4095
-
-// Define the EMA smoothing factor (Alpha). Closer to 0 for more smoothing.
-#define SMOOTHING_ALPHA 0.08f
-
-typedef enum {
-    LED
-} TDEVICE;
-
-volatile uint16_t adcValue = 0;
-volatile int newDataReady = 0;
-volatile float filteredAdcValue = 0.0f; // Stores the smoothed ADC value
-volatile uint16_t ADC_THRESHOLD = 200; //default threshold
 
 ///**
 // * Initialize PWM for LED control on PTE30
@@ -821,8 +881,13 @@ int main(void) {
   startLEDPWM();  //Start LED PWM channel
 
   alarm_signal = xSemaphoreCreateBinary(); //Create mutex for arming
-  disarm_signal = xSemaphoreCreateBinary(); //Create mutex for disarming
+  disarm_signal = xSemaphoreCreateMutex(); //Create mutex for disarming
   dataQueue = xQueueCreate(10, sizeof(uint16_t)); //Create queue for ADC
+
+  // Create the new mutex for the UART global state
+	systemStateMutex = xSemaphoreCreateMutex();
+	queue = xQueueCreate(QLEN, sizeof(TMessage)); // For UART receive task
+
 
 //  adcValueMutex = xSemaphoreCreateMutex();	//Create mutex for ADC conversion
   xTaskCreate(stateControllerTask, "controller", configMINIMAL_STACK_SIZE+100, NULL, 4,NULL);
