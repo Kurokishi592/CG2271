@@ -43,7 +43,6 @@ volatile bool imuTiltRoll = false;    // true if roll exceeded threshold
 
 // Forward-declare FRDM status struct so updateImuTiltFlags (and others) can use it
 struct FrdmStatus {
-  bool armed;
   bool alarm;
   int thrTilt;   // degrees
   int thrLight;
@@ -227,8 +226,8 @@ void imuReportTask(void* pv) {
 // ================== UART to FRDM ==================
 HardwareSerial& FRDM = Serial1;  // use Serial1 with custom pins
 
-// Send a line to FRDM (adds newline) - sends commands to FRDM when user interacts with web UI
-// ARM, DISARM, TH_TILT=xxx, TH_LIGHT=xxx
+// Send a line to FRDM (adds newline) - commands per updated spec:
+// ALARM_ON, ALARM_OFF, TH_LIGHT=xxx, and periodic IMU_TILT=0|1 (from task)
 static void sendLineToFrdm(const String& line) {
   FRDM.println(line);
 }
@@ -241,15 +240,12 @@ String lastStatusLine;
 static void parseFrdmLine(const String& line) {
   lastStatusLine = line;
   if (line.startsWith("STATUS ")) {
-    // SPEC: FRDM -> ESP32: report armed, alarm, light (human-readable line)
-    // Example: STATUS armed=1 alarm=0 light=380
-    // Tolerant parser: will ignore extra fields if present (e.g., thr_*), but only stores required ones
-    frdm.armed = line.indexOf("armed=1") >= 0;
+    // SPEC (updated): FRDM -> ESP32 reports only alarm and light
+    // Example: STATUS alarm=0 light=380
+    // Tolerant to extra fields but only stores required ones
     frdm.alarm = line.indexOf("alarm=1") >= 0;
     int p;
     if ((p = line.indexOf("light=")) >= 0) frdm.light = line.substring(p+6).toInt();
-    // Optional: still accept thr_light if FRDM echoes it; user tilt threshold is owned by ESP32 side
-    if ((p = line.indexOf("thr_light=")) >= 0) frdm.thrLight = line.substring(p+10).toInt();
   } else if (line.startsWith("ALERT ")) {
     frdm.lastAlert = line;
   }
@@ -297,28 +293,37 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
 <body>
   <h2>Tilt & Light Guard</h2>
   <div class="row">
-    <button onclick="cmd('arm')">ARM</button>
-    <button onclick="cmd('disarm')">DISARM</button>
+    <button onclick="cmd('alarm_on')">ALARM ON</button>
+    <button onclick="cmd('alarm_off')">ALARM OFF</button>
   </div>
   <div class="row">
-    Tilt threshold (deg): <input id="tht" type="range" min="0" max="90" value="30" oninput="st(this)"> <span id="thtVal">30</span>
+    Light threshold: <input id="thl" type="range" min="0" max="1023" value="500" oninput="sl(this)" onchange="sl(this)"> <span id="thlVal">500</span>
   </div>
   <div class="row">
-    Light threshold: <input id="thl" type="range" min="0" max="1023" value="500" oninput="sl(this)"> <span id="thlVal">500</span>
+    Tilt threshold (deg): <input id="tht" type="range" min="5" max="90" value="30" oninput="slTilt(this)" onchange="slTilt(this)"> <span id="thtVal">30</span>
   </div>
   <pre id="status">loading...</pre>
 <script>
 function cmd(name){
   fetch('/'+name,{method:'POST'}).then(r=>r.text()).then(t=>console.log(t));
 }
-function st(el){document.getElementById('thtVal').innerText=el.value;fetch('/set?th_tilt='+el.value,{method:'POST'})}
 function sl(el){document.getElementById('thlVal').innerText=el.value;fetch('/set?th_light='+el.value,{method:'POST'})}
+function slTilt(el){document.getElementById('thtVal').innerText=el.value;fetch('/set?th_tilt='+el.value,{method:'POST'})}
 function poll(){
   const url = '/status?t=' + Date.now(); // cache-bust per request
   fetch(url,{cache:'no-store'})
     .then(r=>r.json())
     .then(j=>{
-  document.getElementById('status').textContent=JSON.stringify(j,null,2);
+      document.getElementById('status').textContent=JSON.stringify(j,null,2);
+      // Sync slider values if backend changed
+      if (typeof j.thr_light !== 'undefined') {
+        const thl = document.getElementById('thl');
+        if (thl && thl.value != j.thr_light) { thl.value = j.thr_light; document.getElementById('thlVal').innerText = j.thr_light; }
+      }
+      if (typeof j.thr_tilt !== 'undefined') {
+        const tht = document.getElementById('tht');
+        if (tht && tht.value != j.thr_tilt) { tht.value = j.thr_tilt; document.getElementById('thtVal').innerText = j.thr_tilt; }
+      }
     })
     .catch(e=>{ console.log('poll error', e); })
     .finally(()=>setTimeout(poll,500)); // ~2 Hz
@@ -333,20 +338,19 @@ void handleIndex(){ server.send_P(200, "text/html", INDEX_HTML); }
 void handleNotFound(){ server.send(404, "text/plain", "Not Found"); }
 
 // From client (web) to server (esp32) which then sends to FRDM
-void handleArm(){ sendLineToFrdm("ARM"); server.send(200, "text/plain", "OK"); }
-void handleDisarm(){ sendLineToFrdm("DISARM"); server.send(200, "text/plain", "OK"); }
+void handleAlarmOn(){ sendLineToFrdm("ALARM_ON"); server.send(200, "text/plain", "OK"); }
+void handleAlarmOff(){ sendLineToFrdm("ALARM_OFF"); server.send(200, "text/plain", "OK"); }
 void handleSet(){
   bool ok=false;
-  if (server.hasArg("th_tilt")) {
-    int v = server.arg("th_tilt").toInt();
-    // SPEC: Tilt threshold is owned by ESP32 side only; do not send to FRDM
-    frdm.thrTilt=v; ok=true; // store user tilt threshold locally
-  }
   if (server.hasArg("th_light")) {
     int v = server.arg("th_light").toInt();
     // SPEC: Light threshold is sent to FRDM over UART
     sendLineToFrdm(String("TH_LIGHT=")+v);
     frdm.thrLight=v; ok=true;
+  }
+  if (server.hasArg("th_tilt")) {
+    int v2 = server.arg("th_tilt").toInt();
+    if (v2 >=5 && v2 <= 90) { frdm.thrTilt = v2; ok = true; }
   }
   server.send(ok?200:400, "text/plain", ok?"OK":"NOOP");
 }
@@ -354,10 +358,9 @@ void handleSet(){
 // From FDRM to server (esp32) to client (web)
 void handleStatus(){
   String json = "{";
-  json += "\"armed\":" + String(frdm.armed?1:0) + ",";
   json += "\"alarm\":" + String(frdm.alarm?1:0) + ",";
-  json += "\"thr_tilt\":" + String(frdm.thrTilt) + ",";
   json += "\"thr_light\":" + String(frdm.thrLight) + ",";
+  json += "\"thr_tilt\":" + String(frdm.thrTilt) + ",";
   json += "\"light\":" + String(frdm.light) + ",";
   // // ESP32-side telemetry required by spec
   // json += "\"ax\":" + String(ax,3) + ",";
@@ -393,7 +396,6 @@ void setup() {
   Serial.println("BOOT OK");
 
   // Initialize default FRDM status values (used by IMU tilt threshold and UI)
-  frdm.armed = false;
   frdm.alarm = false;
   frdm.thrTilt = 30;   // default tilt threshold (degrees)
   frdm.thrLight = 500;
@@ -406,7 +408,7 @@ void setup() {
   if (ap) Serial.printf("AP up: %s  IP: %s\n", WIFI_SSID, WiFi.softAPIP().toString().c_str());
 
   // UART to FRDM
-  FRDM.begin(115200, SERIAL_8N1, UART_RX_PIN, UART_TX_PIN);
+  FRDM.begin(9600, SERIAL_8N1, UART_RX_PIN, UART_TX_PIN);
 
   // I2C to MPU-6050 using default Wire
   imuSetup();          // calls Wire.begin(...)
@@ -416,8 +418,8 @@ void setup() {
 
   // Web server routes (ensure server actually runs; these were commented out)
   server.on("/", HTTP_GET, handleIndex);
-  server.on("/arm", HTTP_POST, handleArm);
-  server.on("/disarm", HTTP_POST, handleDisarm);
+  server.on("/alarm_on", HTTP_POST, handleAlarmOn);
+  server.on("/alarm_off", HTTP_POST, handleAlarmOff);
   server.on("/set", HTTP_POST, handleSet);
   server.on("/status", HTTP_GET, handleStatus);
   server.onNotFound(handleNotFound);

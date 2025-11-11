@@ -10,6 +10,7 @@
  * @brief   Application entry point.
  */
 #include <stdio.h>
+#include <string.h>
 #include "board.h"
 #include "peripherals.h"
 #include "pin_mux.h"
@@ -30,160 +31,12 @@ SemaphoreHandle_t alarm_signal; // Semaphore handling LDR sensor (used as a bina
 SemaphoreHandle_t systemStateMutex;
 // Global structure to hold the current system state for UART transmission
 typedef struct {
-    uint8_t isArmed;    // 1 for Armed (Tilt), 0 for Disarmed (SW3)
-    uint8_t isAlarming; // 1 for Alarm triggered (LDR/Tilt), 0 otherwise
+  uint8_t isArmed;    // Interpreted as Alarm Enabled (from ESP32 ALARM_ON/OFF)
+  uint8_t isAlarming; // 1 when siren is active (e.g., LDR over threshold or IMU_TILT=1 while enabled)
 } SystemState_t;
 
 volatile SystemState_t currentState = {0, 0}; // Initialize: Disarmed, Not Alarming
 
-#define BAUD_RATE 9600
-#define UART_TX_PTE22 	22
-#define UART_RX_PTE23 	23
-#define UART2_INT_PRIO	128
-
-void initUART2(uint32_t baud_rate)
-{
-	NVIC_DisableIRQ(UART2_FLEXIO_IRQn);
-	//enable clock to UART2 and PORTE
-	SIM->SCGC4 |= SIM_SCGC4_UART2_MASK;
-	SIM->SCGC5 |= SIM_SCGC5_PORTE_MASK;
-
-	//Ensure Tx and Rx are disabled before configuration
-	UART2->C2 &= ~((UART_C2_TE_MASK) | (UART_C2_RE_MASK));
-
-	//connect UART pins for PTE22, PTE23
-	PORTE->PCR[UART_TX_PTE22] &= ~PORT_PCR_MUX_MASK;
-	PORTE->PCR[UART_TX_PTE22] |= PORT_PCR_MUX(4);
-
-	PORTE->PCR[UART_RX_PTE23] &= ~PORT_PCR_MUX_MASK;
-	PORTE->PCR[UART_RX_PTE23] |= PORT_PCR_MUX(4);
-
-	// Set the baud rate
-	uint32_t bus_clk = CLOCK_GetBusClkFreq();
-
-	// This version of sbr does integer rounding.
-	uint32_t sbr = (bus_clk + (baud_rate * 8)) / (baud_rate * 16);
-
-	// Set SBR. Bits 8 to 12 in BDH, 0-7 in BDL.
-	// MUST SET BDH FIRST!
-	UART2->BDH &= ~UART_BDH_SBR_MASK;
-	UART2->BDH |= ((sbr >> 8) & UART_BDH_SBR_MASK);
-	UART2->BDL = (uint8_t) (sbr &0xFF);
-
-	// Disable loop mode
-	UART2->C1 &= ~UART_C1_LOOPS_MASK;
-	UART2->C1 &= ~UART_C1_RSRC_MASK;
-
-	// Disable parity
-	UART2->C1 &= ~UART_C1_PE_MASK;
-
-	// 8-bit mode
-	UART2->C1 &= ~UART_C1_M_MASK;
-
-	//Enable RX interrupt
-	UART2->C2 |= UART_C2_RIE_MASK;
-
-	// Enable the receiver
-	UART2->C2 |= UART_C2_RE_MASK;
-
-	NVIC_SetPriority(UART2_FLEXIO_IRQn, UART2_INT_PRIO);
-	NVIC_ClearPendingIRQ(UART2_FLEXIO_IRQn);
-	NVIC_EnableIRQ(UART2_FLEXIO_IRQn);
-}
-
-#define MAX_MSG_LEN		256
-char send_buffer[MAX_MSG_LEN];
-
-#define QLEN	5
-QueueHandle_t queue;
-typedef struct tm {
-	char message[MAX_MSG_LEN];
-} TMessage;
-
-void UART2_FLEXIO_IRQHandler(void)
-{
-	// Send and receive pointers
-	static int recv_ptr=0, send_ptr=0;
-	char rx_data;
-	char recv_buffer[MAX_MSG_LEN];
-
-//VIC_ClearPendingIRQ(UART2_FLEXIO_IRQn);
-	if(UART2->S1 & UART_S1_TDRE_MASK) // Send data
-	{
-		if(send_buffer[send_ptr] == '\0') {
-			send_ptr = 0;
-
-			// Disable the transmit interrupt
-			UART2->C2 &= ~UART_C2_TIE_MASK;
-
-			// Disable the transmitter
-			UART2->C2 &= ~UART_C2_TE_MASK;
-		}
-		else {
-			UART2->D = send_buffer[send_ptr++];
-		}
-	}
-
-	if(UART2->S1 & UART_S1_RDRF_MASK)
-	{
-		TMessage msg;
-		rx_data = UART2->D;
-		recv_buffer[recv_ptr++] = rx_data;
-		if(rx_data == '\n') {
-			// Copy over the string
-			BaseType_t hpw;
-			recv_buffer[recv_ptr]='\0';
-			strncpy(msg.message, recv_buffer, MAX_MSG_LEN);
-			xQueueSendFromISR(queue, (void *)&msg, &hpw);
-			portYIELD_FROM_ISR(hpw);
-			recv_ptr = 0;
-		}
-	}
-}
-
-void sendMessage(char *message) {
-	strncpy(send_buffer, message, MAX_MSG_LEN);
-
-	// Enable the TIE interrupt
-	UART2->C2 |= UART_C2_TIE_MASK;
-
-	// Enable the transmitter
-	UART2->C2 |= UART_C2_TE_MASK;
-}
-
-static void recvTask(void *p) {
-	while(1) {
-		TMessage msg;
-		if(xQueueReceive(queue, (TMessage *) &msg, portMAX_DELAY) == pdTRUE) {
-			PRINTF("Received message: %s\r\n", msg.message);
-		}
-	}
-}
-
-static void sendTask(void *p) {
-	char buffer[MAX_MSG_LEN];
-	while(1) {
-        uint8_t arm_state = 0;
-        uint8_t light_state = 0;
-
-        // 1. SAFELY READ THE CURRENT GLOBAL STATE
-        if (xSemaphoreTake(systemStateMutex, portMAX_DELAY) == pdTRUE) {
-            arm_state = currentState.isArmed;
-            light_state = currentState.isAlarming;
-            xSemaphoreGive(systemStateMutex);
-        }
-
-        // 2. FORMAT THE MESSAGE (e.g., "1,0\n" for Armed, No Alarm)
-        // Format: <ARM_STATE (0/1)>,<ALARM_STATE (0/1)>\n
-		sprintf(buffer, "%d,%d\n", arm_state, light_state);
-
-        // 3. SEND THE MESSAGE
-		sendMessage(buffer);
-
-        // 4. WAIT BEFORE SENDING THE NEXT UPDATE
-		vTaskDelay(pdMS_TO_TICKS(500)); // Send state update every 500ms
-	}
-}
 
 /* Initialize interrupts for SW2 and SW3 */
 
@@ -801,6 +654,193 @@ static void setPWMTask(void *p) {
 	}
 }
 //}
+#define BAUD_RATE 9600
+#define UART_TX_PTE22 	22
+#define UART_RX_PTE23 	23
+#define UART2_INT_PRIO	128
+
+void initUART2(uint32_t baud_rate)
+{
+	NVIC_DisableIRQ(UART2_FLEXIO_IRQn);
+	//enable clock to UART2 and PORTE
+	SIM->SCGC4 |= SIM_SCGC4_UART2_MASK;
+	SIM->SCGC5 |= SIM_SCGC5_PORTE_MASK;
+
+	//Ensure Tx and Rx are disabled before configuration
+	UART2->C2 &= ~((UART_C2_TE_MASK) | (UART_C2_RE_MASK));
+
+	//connect UART pins for PTE22, PTE23
+	PORTE->PCR[UART_TX_PTE22] &= ~PORT_PCR_MUX_MASK;
+	PORTE->PCR[UART_TX_PTE22] |= PORT_PCR_MUX(4);
+
+	PORTE->PCR[UART_RX_PTE23] &= ~PORT_PCR_MUX_MASK;
+	PORTE->PCR[UART_RX_PTE23] |= PORT_PCR_MUX(4);
+
+	// Set the baud rate
+	uint32_t bus_clk = CLOCK_GetBusClkFreq();
+
+	// This version of sbr does integer rounding.
+	uint32_t sbr = (bus_clk + (baud_rate * 8)) / (baud_rate * 16);
+
+	// Set SBR. Bits 8 to 12 in BDH, 0-7 in BDL.
+	// MUST SET BDH FIRST!
+	UART2->BDH &= ~UART_BDH_SBR_MASK;
+	UART2->BDH |= ((sbr >> 8) & UART_BDH_SBR_MASK);
+	UART2->BDL = (uint8_t) (sbr &0xFF);
+
+	// Disable loop mode
+	UART2->C1 &= ~UART_C1_LOOPS_MASK;
+	UART2->C1 &= ~UART_C1_RSRC_MASK;
+
+	// Disable parity
+	UART2->C1 &= ~UART_C1_PE_MASK;
+
+	// 8-bit mode
+	UART2->C1 &= ~UART_C1_M_MASK;
+
+	//Enable RX interrupt
+	UART2->C2 |= UART_C2_RIE_MASK;
+
+	// Enable the receiver
+	UART2->C2 |= UART_C2_RE_MASK;
+
+	NVIC_SetPriority(UART2_FLEXIO_IRQn, UART2_INT_PRIO);
+	NVIC_ClearPendingIRQ(UART2_FLEXIO_IRQn);
+	NVIC_EnableIRQ(UART2_FLEXIO_IRQn);
+}
+
+#define MAX_MSG_LEN		256
+char send_buffer[MAX_MSG_LEN];
+
+#define QLEN	5
+QueueHandle_t queue;
+typedef struct tm {
+	char message[MAX_MSG_LEN];
+} TMessage;
+
+void UART2_FLEXIO_IRQHandler(void)
+{
+	// Send and receive pointers
+	static int recv_ptr=0, send_ptr=0;
+	char rx_data;
+	char recv_buffer[MAX_MSG_LEN];
+
+//VIC_ClearPendingIRQ(UART2_FLEXIO_IRQn);
+	if(UART2->S1 & UART_S1_TDRE_MASK) // Send data
+	{
+		if(send_buffer[send_ptr] == '\0') {
+			send_ptr = 0;
+
+			// Disable the transmit interrupt
+			UART2->C2 &= ~UART_C2_TIE_MASK;
+
+			// Disable the transmitter
+			UART2->C2 &= ~UART_C2_TE_MASK;
+		}
+		else {
+			UART2->D = send_buffer[send_ptr++];
+		}
+	}
+
+	if(UART2->S1 & UART_S1_RDRF_MASK)
+	{
+		TMessage msg;
+		rx_data = UART2->D;
+		recv_buffer[recv_ptr++] = rx_data;
+		if(rx_data == '\n') {
+			// Copy over the string
+			BaseType_t hpw;
+			recv_buffer[recv_ptr]='\0';
+			strncpy(msg.message, recv_buffer, MAX_MSG_LEN);
+			xQueueSendFromISR(queue, (void *)&msg, &hpw);
+			portYIELD_FROM_ISR(hpw);
+			recv_ptr = 0;
+		}
+	}
+}
+
+void sendMessage(char *message) {
+	strncpy(send_buffer, message, MAX_MSG_LEN);
+
+	// Enable the TIE interrupt
+	UART2->C2 |= UART_C2_TIE_MASK;
+
+	// Enable the transmitter
+	UART2->C2 |= UART_C2_TE_MASK;
+}
+
+static void recvTask(void *p) {
+	while(1) {
+		TMessage msg;
+		if(xQueueReceive(queue, (TMessage *) &msg, portMAX_DELAY) == pdTRUE) {
+      // Trim CRLF
+      char *line = msg.message;
+      size_t n = strlen(line);
+      while (n && (line[n-1] == '\r' || line[n-1] == '\n')) { line[--n] = '\0'; }
+
+      // Handle commands from ESP32 (bare-metal friendly, short ASCII):
+      // ALARM_ON | ALARM_OFF | TH_LIGHT=NNN | IMU_TILT=0|1
+      if (strncmp(line, "ALARM_ON", 8) == 0) {
+        if (xSemaphoreTake(systemStateMutex, portMAX_DELAY) == pdTRUE) {
+          currentState.isArmed = 1;   // alarm enabled
+          // Clearing active siren state is optional; keep as-is
+          xSemaphoreGive(systemStateMutex);
+        }
+        // Optionally play a small tune or LED indication via arm_state_signal
+        xSemaphoreGive(arm_state_signal);
+      } else if (strncmp(line, "ALARM_OFF", 9) == 0) {
+        if (xSemaphoreTake(systemStateMutex, portMAX_DELAY) == pdTRUE) {
+          currentState.isArmed = 0;   // alarm disabled
+          currentState.isAlarming = 0; // stop siren state
+          xSemaphoreGive(systemStateMutex);
+        }
+        // Signal tasks to wind down
+        xSemaphoreGive(arm_state_signal);
+        xSemaphoreGive(alarm_signal);
+      } else if (strncmp(line, "TH_LIGHT=", 9) == 0) {
+        // Parse numeric threshold
+        const char *p = line + 9; unsigned val = 0;
+        while (*p >= '0' && *p <= '9') { val = val*10 + (unsigned)(*p - '0'); p++; }
+        ADC_THRESHOLD = (uint16_t)val;
+      } else if (strncmp(line, "IMU_TILT=", 9) == 0) {
+        // Parse 0 or 1
+        int tilt = (line[9] == '1') ? 1 : 0;
+        // If alarm is enabled and tilt asserted, activate siren
+        if (tilt) {
+          BaseType_t armed = 0;
+          if (xSemaphoreTake(systemStateMutex, portMAX_DELAY) == pdTRUE) {
+            armed = currentState.isArmed;
+            if (armed) currentState.isAlarming = 1;
+            xSemaphoreGive(systemStateMutex);
+          }
+          if (armed) xSemaphoreGive(alarm_signal);
+        }
+      }
+		}
+	}
+}
+
+static void sendTask(void *p) {
+  char buffer[MAX_MSG_LEN];
+  while(1) {
+    uint8_t alarm_enabled = 0;
+    uint16_t light_val = 0;
+
+    // Safely read global state
+    if (xSemaphoreTake(systemStateMutex, portMAX_DELAY) == pdTRUE) {
+      alarm_enabled = currentState.isArmed; // treated as alarm on/off
+      xSemaphoreGive(systemStateMutex);
+    }
+
+    light_val = adcValue; // raw ADC reading is fine for STATUS
+
+    // Format the STATUS line expected by ESP32: STATUS alarm=<0|1> light=<value>\n
+    snprintf(buffer, sizeof(buffer), "STATUS alarm=%u light=%u\n", (unsigned)alarm_enabled, (unsigned)light_val);
+
+    sendMessage(buffer);
+    vTaskDelay(pdMS_TO_TICKS(500)); // ~2 Hz via ESP poll; 500ms is OK
+  }
+}
 
 int main(void) {
 
