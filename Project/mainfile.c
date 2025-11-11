@@ -21,14 +21,22 @@
 #include "FreeRTOS.h"
 #include "semphr.h"
 #include "task.h"
-#include "queue.h"
 
 QueueHandle_t dataQueue; //queue for ADC
 
-SemaphoreHandle_t arm_state_signal; //Semaphore handling arm/disarmed
-SemaphoreHandle_t alarm_signal; //Semaphore handling LDR sensor
-SemaphoreHandle_t adcValueMutex; //Semaphore handling ADC conversion\
+SemaphoreHandle_t alarm_signal; //Semaphore handling alarm is triggered
+SemaphoreHandle_t disarm_signal; //Semaphore handling disarm is triggered
 
+typedef enum {
+    DISARM = 0,
+	ALARM = 1
+} SystemState_t;
+
+volatile SystemState_t systemState = DISARM;   // shared state
+static volatile BaseType_t stopFlag = 0;   // shared state
+
+static TaskHandle_t taskHappyHandle = NULL;
+static TaskHandle_t taskAlarmHandle = NULL;
 
 
 // ================= UART STUFF ==================
@@ -169,6 +177,7 @@ static void sendTask(void *p) {
 	}
 }
 
+
 /* Initialize interrupts for SW2 and SW3 */
 
 // TILTSWITCH is connected to PTC5, SW3 to PTA4
@@ -273,10 +282,9 @@ void PORTC_PORTD_IRQHandler() {
 	// Check that it is TILTSWITCH pressed
 	if (PORTC->ISFR & 1 << TILTSWITCH) {
 	  GPIOD->PSOR = (1 << INTERRUPTPIN);  // Toggle mode
-	  BaseType_t hpw = pdTRUE;
-	  xSemaphoreTakeFromISR(arm_state_signal, &hpw);
-	  xSemaphoreTakeFromISR(alarm_signal, &hpw);
-//	  portYIELD_FROM_ISR(hpw);
+	  BaseType_t hpw = pdFALSE;
+	  xSemaphoreGiveFromISR(alarm_signal, &hpw);
+	  portYIELD_FROM_ISR(hpw);
 	}
 	// Write a 1 to clear the ISFR bit
 	PORTC->ISFR |= (1 << TILTSWITCH);
@@ -291,15 +299,43 @@ void PORTA_IRQHandler() {
   // Check that it is SW2 pressed
   if (PORTA->ISFR & 1 << SW3) {
 	  GPIOD->PCOR = (1 << INTERRUPTPIN);  // Toggle mode
-	  BaseType_t hpw = pdTRUE;
-	  xSemaphoreGiveFromISR(arm_state_signal,&hpw);
-	  xSemaphoreGiveFromISR(alarm_signal,&hpw);
+	  BaseType_t hpw = pdFALSE;
+	  xSemaphoreGiveFromISR(disarm_signal, &hpw);
 	  portYIELD_FROM_ISR(hpw);
       // Clear interrupt flag correctly
       PORTA->PCR[SW3] |= PORT_PCR_ISF_MASK;
   }
     // Write a 1 to clear the ISFR bit
     PORTA->ISFR |= (1 << SW3);
+}
+
+// State updater task
+void stateControllerTask(void *p) {
+    while (1) {
+    	if (xSemaphoreTake(alarm_signal, portMAX_DELAY) == pdTRUE) {
+            // Toggle the logical state (persistent memory)
+            taskENTER_CRITICAL();     // ensures atomicity
+            systemState = ALARM;
+            taskEXIT_CRITICAL();
+            stopFlag = 1;
+            // Wake the relevant task
+            xTaskNotify(taskHappyHandle, 0, eNoAction);
+            xTaskNotify(taskAlarmHandle, 0, eNoAction);
+
+        } else if (xSemaphoreTake(disarm_signal, portMAX_DELAY) == pdTRUE) {
+            // Toggle the logical state (persistent memory)
+            taskENTER_CRITICAL();     // ensures atomicity
+            systemState = DISARM;
+            taskEXIT_CRITICAL();
+            stopFlag = 1;
+
+            // Wake the relevant task
+            xTaskNotify(taskHappyHandle, 0, eNoAction);
+            xTaskNotify(taskAlarmHandle, 0, eNoAction);
+
+        }
+
+    }
 }
 
 //BUZZER CODE SECTION
@@ -324,6 +360,7 @@ void PORTA_IRQHandler() {
 #define NOTE_C5 523
 #define NOTE_LOW_SIREN_START 220
 #define NOTE_HIGH_SIREN_END 330
+
 
 
 /*
@@ -462,13 +499,13 @@ void playToneInterruptible(uint32_t freq, uint32_t duration_ms)
     while (elapsed < duration_ms)
     {
         // Check if state was turned off
-        if (xSemaphoreTake(arm_state_signal, 0) != pdTRUE)
+        if(stopFlag)
         {
-            setBuzzerFrequency(0);   // immediate cutoff
-            return;
+        	setBuzzerFrequency(0);
+            return; // Immediate exit
         }
 
-        xSemaphoreGive(arm_state_signal);  // keep semaphore ON
+//        xSemaphoreGive(alarm_signal);  // keep semaphore ON
         delay_ms(1); //it exists so therefore it does
         elapsed++;
     }
@@ -479,12 +516,12 @@ void playToneInterruptible(uint32_t freq, uint32_t duration_ms)
 }
 // --- START: Added function to play a simple, high-pitched tune ---
 void playHappyTuneTask(void *P) {
-
+	SystemState_t currentState;
 	while(1) {
-
-		if (xSemaphoreTake(arm_state_signal, portMAX_DELAY) == pdTRUE) {
-			xSemaphoreGive(arm_state_signal);
+		currentState = systemState;
+		if (currentState == DISARM) {
 			// Play 8th notes (125ms duration) from a simple major scale sequence
+			stopFlag = 0;
 			playToneInterruptible(NOTE_C4, 50); // C
 			playToneInterruptible(0,1);
 			playToneInterruptible(NOTE_D4, 50); // D
@@ -501,8 +538,11 @@ void playHappyTuneTask(void *P) {
 			playToneInterruptible(0,1);
 			playToneInterruptible(NOTE_C4, 50); // C (Low) - Dotted Quarter note
 			playToneInterruptible(0,1);
+
+            ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(100));
+		} else {
+            ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
 		}
-		vTaskDelay(pdMS_TO_TICKS(10));      // 1ms chunk
 	}
 }
 // --- END: Added function to play a simple, high-pitched tune ---
@@ -514,12 +554,12 @@ void playPoliceSirenTask() {
 	const int delay_time = 5; // milliseconds of delay for each step
 	const int steps = 10; // number of steps from min to max frequency
 	int current_freq;
+	SystemState_t currentState;
 
 	while (1) {
-		//TODO: Change this to use alarm semaphore, test with arm for now.
-		if (xSemaphoreTake(alarm_signal, portMAX_DELAY) == pdTRUE) {
-			xSemaphoreGive(alarm_signal);
-
+		currentState = systemState;
+		if (currentState == ALARM) {
+			stopFlag = 0;
 			for (int i = 0; i < 2; i++) { // Repeat the wail cycle 4 times
 				// Wail UP (Low to High)
 				for (int j = 0; j <= steps; j++) {
@@ -534,8 +574,10 @@ void playPoliceSirenTask() {
 					playToneInterruptible(current_freq, delay_time);
 				}
 			}
+            ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(100));
+		} else {
+            ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
 		}
-		vTaskDelay(pdMS_TO_TICKS(10));
 	}
 }
 // --- END: Added function to play a sad/police siren wailing tone ---
@@ -709,9 +751,9 @@ static void convertADCTask(void *p) {
 //        PRINTF("adcValue: %4d \r \n", adcValue);
 
         // check if threshold event should happen
-        if (adcValue > ADC_THRESHOLD) {
-            xSemaphoreGive(alarm_signal);
-        }
+//        if (adcValue > ADC_THRESHOLD) {
+//            xSemaphoreGive(alarm_signal);
+//        }
 
         vTaskDelay(pdMS_TO_TICKS(10));  // sample every 10 ms (100 Hz)
     }
@@ -778,15 +820,16 @@ int main(void) {
   setPWM(LED, 0);  // Start with LED off
   startLEDPWM();  //Start LED PWM channel
 
-  arm_state_signal = xSemaphoreCreateMutex(); //Create mutex for arming
   alarm_signal = xSemaphoreCreateBinary(); //Create mutex for arming
+  disarm_signal = xSemaphoreCreateBinary(); //Create mutex for disarming
   dataQueue = xQueueCreate(10, sizeof(uint16_t)); //Create queue for ADC
 
 //  adcValueMutex = xSemaphoreCreateMutex();	//Create mutex for ADC conversion
-  xTaskCreate(playHappyTuneTask, "task_happy", configMINIMAL_STACK_SIZE+100, NULL, 1, NULL);
-  xTaskCreate(playPoliceSirenTask, "task_alert", configMINIMAL_STACK_SIZE+100, NULL, 2, NULL);
+  xTaskCreate(stateControllerTask, "controller", configMINIMAL_STACK_SIZE+100, NULL, 4,NULL);
+  xTaskCreate(playHappyTuneTask, "task_happy", configMINIMAL_STACK_SIZE+100, NULL, 2, &taskHappyHandle);
+  xTaskCreate(playPoliceSirenTask, "task_alert", configMINIMAL_STACK_SIZE+100, NULL, 2, &taskAlarmHandle);
   xTaskCreate(convertADCTask, "task_adc", configMINIMAL_STACK_SIZE+100, NULL, 3, NULL);
-  xTaskCreate(setPWMTask, "task_ledpwm", configMINIMAL_STACK_SIZE+100, NULL, 4, NULL);
+  xTaskCreate(setPWMTask, "task_ledpwm", configMINIMAL_STACK_SIZE+100, NULL, 3, NULL);
 
   vTaskStartScheduler();
 
