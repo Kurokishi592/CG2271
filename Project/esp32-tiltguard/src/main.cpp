@@ -7,12 +7,12 @@
 #include <Kalman.h>
 
 // UART pins from ESP32-S2 to FRDM
-#define UART_TX_PIN 18  // ESP32-S2 TX -> FRDM RX
-#define UART_RX_PIN 17  // ESP32-S2 RX -> FRDM TX
+#define UART_TX_PIN 9  // ESP32-S2 TX -> FRDM RX UART 2
+#define UART_RX_PIN 10  // ESP32-S2 RX -> FRDM TX UART 2
 
 // I2C pins to MPU-6050 (GY-521)
-#define I2C_SDA_PIN 33
-#define I2C_SCL_PIN 35
+#define I2C_SDA_PIN 35
+#define I2C_SCL_PIN 33
 
 // IMU Raw -> Roll/Pitch
 #define sqr(x) x * x
