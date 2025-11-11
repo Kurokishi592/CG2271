@@ -387,7 +387,7 @@ void handleStatus(){
 
 // ================== setup/loop ==================
 void setup() {
-  Serial.begin(115200);
+  Serial.begin(9600);
   delay(200);
   Serial.println("ESP32-S2 TiltGuard starting...");
   Serial.println("BOOT OK");
