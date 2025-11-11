@@ -132,10 +132,10 @@ void PORTC_PORTD_IRQHandler() {
 	// Check that it is TILTSWITCH pressed
 	if (PORTC->ISFR & 1 << TILTSWITCH) {
 	  GPIOD->PSOR = (1 << INTERRUPTPIN);  // Toggle mode
-	  BaseType_t hpw = pdTRUE;
+	  BaseType_t hpw = pdFALSE;
 	  xSemaphoreTakeFromISR(arm_state_signal, &hpw);
 	  xSemaphoreTakeFromISR(alarm_signal, &hpw);
-//	  portYIELD_FROM_ISR(hpw);
+	  portYIELD_FROM_ISR(hpw);
 	}
 	// Write a 1 to clear the ISFR bit
 	PORTC->ISFR |= (1 << TILTSWITCH);
@@ -320,15 +320,21 @@ void playToneInterruptible(uint32_t freq, uint32_t duration_ms)
 
     while (elapsed < duration_ms)
     {
-        // Check if state was turned off
-        if (xSemaphoreTake(arm_state_signal, 0) != pdTRUE)
+        // Check if EITHER state was turned off (for interruption from either tune)
+        if (xSemaphoreTake(arm_state_signal, 0) != pdTRUE || 
+            xSemaphoreTake(alarm_signal, 0) != pdTRUE)
         {
             setBuzzerFrequency(0);   // immediate cutoff
+            // Try to restore any semaphore we successfully took
+            xSemaphoreGive(arm_state_signal);
+            xSemaphoreGive(alarm_signal);
             return;
         }
 
-        xSemaphoreGive(arm_state_signal);  // keep semaphore ON
-        delay_ms(1); //it exists so therefore it does
+        // Keep both semaphores ON if we took them
+        xSemaphoreGive(arm_state_signal);
+        xSemaphoreGive(alarm_signal);
+        delay_ms(1);
         elapsed++;
     }
 
@@ -567,8 +573,8 @@ static void convertADCTask(void *p) {
         xQueueSend(dataQueue, &adcValue, 0);
 //        PRINTF("adcValue: %4d \r \n", adcValue);
 
-        // check if threshold event should happen
-        if (adcValue > ADC_THRESHOLD) {
+        // check if threshold event should happen (LOW ADC = DARK = trigger alarm)
+        if (adcValue < ADC_THRESHOLD) {
             xSemaphoreGive(alarm_signal);
         }
 
