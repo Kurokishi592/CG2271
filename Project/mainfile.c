@@ -23,6 +23,7 @@
 #include "task.h"
 #include "queue.h"
 
+QueueHandle_t dataQueue; //queue for ADC
 
 SemaphoreHandle_t arm_state_signal; //Semaphore handling arm/disarmed
 SemaphoreHandle_t alarm_signal; //Semaphore handling LDR sensor
@@ -264,29 +265,6 @@ void initTILTSWITCHInterrupt() {
   NVIC_EnableIRQ(PORTC_PORTD_IRQn);
 }
 
-//Called when task is
-//static void armBoardTask(void *p) {
-//	//TODO: Refactor to make this a task
-//	while(1) {
-//		//Wait for armed state
-//		if (xSemaphoreTake(arm_state_signal, portMAX_DELAY) == pdTRUE) {
-//			//Do shit here
-//			  GPIOD->PSOR = (1 << INTERRUPTPIN);  // Toggle mode
-//		}
-//	}
-//}
-//
-//static void disarmBoardTask(void *p) {
-//	//TODO:  Refactor to make this a task
-//	while(1) {
-//		//Wait for armed state
-//		if (xSemaphoreTake(arm_state_signal, 0) == pdTRUE) {
-//			//Do shit here
-//			  GPIOD->PCOR = (1 << INTERRUPTPIN);  // Toggle mode
-//		}
-//	}
-//}
-
 // TILTSWITCH IRQHandler.  TILTSWITCH switches on the red LED
 void PORTC_PORTD_IRQHandler() {
   // Clear pending IRQ for PORTC
@@ -297,7 +275,8 @@ void PORTC_PORTD_IRQHandler() {
 	  GPIOD->PSOR = (1 << INTERRUPTPIN);  // Toggle mode
 	  BaseType_t hpw = pdTRUE;
 	  xSemaphoreTakeFromISR(arm_state_signal, &hpw);
-	  portYIELD_FROM_ISR(hpw);
+	  xSemaphoreTakeFromISR(alarm_signal, &hpw);
+//	  portYIELD_FROM_ISR(hpw);
 	}
 	// Write a 1 to clear the ISFR bit
 	PORTC->ISFR |= (1 << TILTSWITCH);
@@ -314,6 +293,7 @@ void PORTA_IRQHandler() {
 	  GPIOD->PCOR = (1 << INTERRUPTPIN);  // Toggle mode
 	  BaseType_t hpw = pdTRUE;
 	  xSemaphoreGiveFromISR(arm_state_signal,&hpw);
+	  xSemaphoreGiveFromISR(alarm_signal,&hpw);
 	  portYIELD_FROM_ISR(hpw);
       // Clear interrupt flag correctly
       PORTA->PCR[SW3] |= PORT_PCR_ISF_MASK;
@@ -391,7 +371,6 @@ void delay_ms(uint32_t ms) {
 		// Adjust this value based on your specific processor speed to achieve accurate 1ms delay
 		volatile uint32_t delay_count = 10000;
 		while (delay_count--) {
-			__asm("nop"); // No Operation
 		}
 	}
 }
@@ -503,7 +482,6 @@ void playHappyTuneTask(void *P) {
 
 	while(1) {
 
-
 		if (xSemaphoreTake(arm_state_signal, portMAX_DELAY) == pdTRUE) {
 			xSemaphoreGive(arm_state_signal);
 			// Play 8th notes (125ms duration) from a simple major scale sequence
@@ -539,8 +517,8 @@ void playPoliceSirenTask() {
 
 	while (1) {
 		//TODO: Change this to use alarm semaphore, test with arm for now.
-		if (xSemaphoreTake(arm_state_signal, portMAX_DELAY) == pdTRUE) {
-			xSemaphoreGive(arm_state_signal);
+		if (xSemaphoreTake(alarm_signal, portMAX_DELAY) == pdTRUE) {
+			xSemaphoreGive(alarm_signal);
 
 			for (int i = 0; i < 2; i++) { // Repeat the wail cycle 4 times
 				// Wail UP (Low to High)
@@ -557,7 +535,7 @@ void playPoliceSirenTask() {
 				}
 			}
 		}
-		vTaskDelay(pdMS_TO_TICKS(100));
+		vTaskDelay(pdMS_TO_TICKS(10));
 	}
 }
 // --- END: Added function to play a sad/police siren wailing tone ---
@@ -585,6 +563,7 @@ typedef enum {
 volatile uint16_t adcValue = 0;
 volatile int newDataReady = 0;
 volatile float filteredAdcValue = 0.0f; // Stores the smoothed ADC value
+volatile uint16_t ADC_THRESHOLD = 200; //default threshold
 
 ///**
 // * Initialize PWM for LED control on PTE30
@@ -708,26 +687,8 @@ void initADC() {
     // Do NOT use continuous conversion mode; we poll this
     ADC0->SC3 &= ~ADC_SC3_ADCO_MASK;
     ADC0->SC1[0] &= ~ADC_SC1_AIEN_MASK;
-//    ADC0->SC3 |= ADC_SC3_ADCO(1);  // Continuous conversion
-
-//    // Set interrupt priority (lowest)
-//    NVIC_SetPriority(ADC0_IRQn, 192);
-//    NVIC_EnableIRQ(ADC0_IRQn);
 
 }
-
-///**
-// * Start ADC conversion on specified channel
-// * @param channel: ADC channel number (0 for PTE20)
-// */
-//void startADC(int channel) {
-////    PRINTF("Started ADC on channel %d\r\n", channel);
-//
-//    // Select channel and start conversion
-//    ADC0->SC1[0] &= ~ADC_SC1_ADCH_MASK;
-//    ADC0->SC1[0] |= ADC_SC1_ADCH(channel);
-//}
-
 /*
  * Read the ADC values manually from the channel
  */
@@ -742,46 +703,45 @@ uint16_t readADC(int channel) {
 static void convertADCTask(void *p) {
     while (1) {
         uint16_t newValue = readADC(ADC_CHANNEL);
-
-        // store safely using mutex
-        xSemaphoreTake(adcValueMutex, portMAX_DELAY);
         adcValue = newValue;
-        xSemaphoreGive(adcValueMutex);
+
+        xQueueSend(dataQueue, &adcValue, 0);
+//        PRINTF("adcValue: %4d \r \n", adcValue);
+
+        // check if threshold event should happen
+        if (adcValue > ADC_THRESHOLD) {
+            xSemaphoreGive(alarm_signal);
+        }
 
         vTaskDelay(pdMS_TO_TICKS(10));  // sample every 10 ms (100 Hz)
     }
 }
 
 static void setPWMTask(void *p) {
-	uint16_t currentValue;
+//	uint16_t currentValue;
 	while (1){
-		xSemaphoreTake(adcValueMutex, portMAX_DELAY);
-		currentValue = adcValue;
-		xSemaphoreGive(adcValueMutex);
+        if (xQueueReceive(dataQueue, &adcValue, portMAX_DELAY)) {
+    		//TODO: Add adc smoothening here
+            // Apply Exponential Moving Average (EMA) filter
+            if (filteredAdcValue == 0.0f) {
+                // Initial state: set filter value to the first reading
+                filteredAdcValue = (float)adcValue;
+            } else {
+                // V_filtered = Alpha * V_new + (1 - Alpha) * V_filtered_old
+                filteredAdcValue = (SMOOTHING_ALPHA * (float)adcValue) +
+                                   ((1.0f - SMOOTHING_ALPHA) * filteredAdcValue);
+            }
 
+            // --- MODIFIED BRIGHTNESS CALCULATION (Using Smoothed Value) ---
 
-		//TODO: Add adc smoothening here
-        // Apply Exponential Moving Average (EMA) filter
-        if (filteredAdcValue == 0.0f) {
-            // Initial state: set filter value to the first reading
-            filteredAdcValue = (float)adcValue;
-        } else {
-            // V_filtered = Alpha * V_new + (1 - Alpha) * V_filtered_old
-            filteredAdcValue = (SMOOTHING_ALPHA * (float)adcValue) +
-                               ((1.0f - SMOOTHING_ALPHA) * filteredAdcValue);
+            // Use the smoothed value for inversion. Note: We cast to int for inversion,
+            // but keep the double/float for the division/percentage calculation.
+
+            // Light Meter Function: Bright LDR light -> BRIGHT LED (low CnV value)
+            int invertedAdc = MAX_ADC_VALUE - (int)filteredAdcValue;
+            int brightness = (int)(((float)invertedAdc / (float)MAX_ADC_VALUE) * 100.0f);
+    		setPWM(LED, brightness);
         }
-
-        newDataReady = 1;      // Set flag to signal main loop
-
-        // --- MODIFIED BRIGHTNESS CALCULATION (Using Smoothed Value) ---
-
-        // Use the smoothed value for inversion. Note: We cast to int for inversion,
-        // but keep the double/float for the division/percentage calculation.
-
-        // Light Meter Function: Bright LDR light -> BRIGHT LED (low CnV value)
-        int invertedAdc = MAX_ADC_VALUE - (int)filteredAdcValue;
-        int brightness = (int)(((float)invertedAdc / (float)MAX_ADC_VALUE) * 100.0f);
-		setPWM(LED, brightness);
 
 		vTaskDelay(pdMS_TO_TICKS(10)); // update at same rate
 	}
@@ -799,7 +759,6 @@ int main(void) {
   BOARD_InitDebugConsole();
 #endif
 
-  PRINTF("Hello World\r\n");
 
   // Initialize and switch off LEDs
   initLEDs();
@@ -820,11 +779,14 @@ int main(void) {
   startLEDPWM();  //Start LED PWM channel
 
   arm_state_signal = xSemaphoreCreateMutex(); //Create mutex for arming
-  adcValueMutex = xSemaphoreCreateMutex();	//Create mutex for ADC conversion
-  xTaskCreate(playHappyTuneTask, "task_happy", configMINIMAL_STACK_SIZE+100, NULL, 2, NULL);
-//  xTaskCreate(playPoliceSirenTask, "task_alert", configMINIMAL_STACK_SIZE+100, NULL, 1, NULL);
-  xTaskCreate(convertADCTask, "task_adc", configMINIMAL_STACK_SIZE+100, NULL, 1, NULL);
-  xTaskCreate(setPWMTask, "task_ledpwm", configMINIMAL_STACK_SIZE+100, NULL, 3, NULL);
+  alarm_signal = xSemaphoreCreateBinary(); //Create mutex for arming
+  dataQueue = xQueueCreate(10, sizeof(uint16_t)); //Create queue for ADC
+
+//  adcValueMutex = xSemaphoreCreateMutex();	//Create mutex for ADC conversion
+  xTaskCreate(playHappyTuneTask, "task_happy", configMINIMAL_STACK_SIZE+100, NULL, 1, NULL);
+  xTaskCreate(playPoliceSirenTask, "task_alert", configMINIMAL_STACK_SIZE+100, NULL, 2, NULL);
+  xTaskCreate(convertADCTask, "task_adc", configMINIMAL_STACK_SIZE+100, NULL, 3, NULL);
+  xTaskCreate(setPWMTask, "task_ledpwm", configMINIMAL_STACK_SIZE+100, NULL, 4, NULL);
 
   vTaskStartScheduler();
 
