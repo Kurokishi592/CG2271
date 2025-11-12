@@ -576,7 +576,7 @@ void playPoliceSirenTask() {
 		currState = currentState;
 		if (currState.isAlarming == 1) {
 			stopFlag = 0;
-			for (int i = 0; i < 2; i++) { // Repeat the wail cycle 4 times
+//			for (int i = 0; i < 2; i++) { // Repeat the wail cycle 4 times
 				// Wail UP (Low to High)
 				for (int j = 0; j <= steps; j++) {
 					// Linear interpolation of frequency
@@ -589,7 +589,8 @@ void playPoliceSirenTask() {
 					current_freq = NOTE_LOW_SIREN_START + j * (NOTE_HIGH_SIREN_END - NOTE_LOW_SIREN_START) / steps;
 					playToneInterruptible(current_freq, delay_time);
 				}
-			}
+//			}
+
             ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(100));
 		} else {
             ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
