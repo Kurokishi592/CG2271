@@ -251,7 +251,7 @@ static void sendTask(void *p) {
 
     snprintf(buffer, sizeof(buffer), "STATUS alarm=%u light=%u\n", (unsigned)alarm_on, (unsigned)light_val);
     sendMessage(buffer);
-    vTaskDelay(pdMS_TO_TICKS(500)); // ~2 Hz
+    vTaskDelay(pdMS_TO_TICKS(250)); // ~4 Hz
   }
 }
 
