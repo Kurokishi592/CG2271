@@ -281,40 +281,6 @@ void ledOn() {
   GPIOD->PSOR |= (1 << INTERRUPTPIN);
 }
 
-// SW3 is connected to PTA4
-void initSW3Interrupt() {
-  // Enable clock for PORTA
-  SIM->SCGC5 |= SIM_SCGC5_PORTA_MASK;
-
-  // Disable interrupts before configuring
-  NVIC_DisableIRQ(PORTA_IRQn);
-
-  // Set PTC5 to GPIO
-  PORTA->PCR[SW3] &= ~PORT_PCR_MUX_MASK;
-  PORTA->PCR[SW3] |= PORT_PCR_MUX(1);
-
-  // Enable pull-up resistor (PS bit) and pull enable (PE bit)
-  PORTA->PCR[SW3] &= ~PORT_PCR_PS_MASK;
-  PORTA->PCR[SW3] |= PORT_PCR_PS(1);
-  PORTA->PCR[SW3] &= ~PORT_PCR_PE_MASK;
-  PORTA->PCR[SW3] |= PORT_PCR_PE(1);
-
-  // Set as input
-  GPIOA->PDDR &= ~(1 << SW3);
-
-  // Configure interrupt for falling edge
-  PORTA->PCR[SW3] &= ~PORT_PCR_IRQC_MASK;
-  PORTA->PCR[SW3] |= PORT_PCR_IRQC(0b1001);
-
-  // Set NVIC priority to the lowest (192)
-  NVIC_SetPriority(PORTA_IRQn, 192); //TODO: upgrade this priority to override tilt
-
-  // Clear pending interrupts
-  NVIC_ClearPendingIRQ(PORTA_IRQn);
-
-  // Enable interrupts
-  NVIC_EnableIRQ(PORTA_IRQn);
-}
 
 // TILTSWITCH is connected to PTC3
 void initTILTSWITCHInterrupt() {
@@ -361,25 +327,12 @@ void PORTC_PORTD_IRQHandler() {
     taskENTER_CRITICAL(); alarming = currentState.isAlarming; taskEXIT_CRITICAL();
     if (alarming) {
         xSemaphoreGiveFromISR(disarm_signal, &hpw);
-    } else {
-        xSemaphoreGiveFromISR(alarm_signal, &hpw);
     }
     portYIELD_FROM_ISR(hpw);
   }
   PORTC->ISFR |= (1 << TILTSWITCH);
 }
 
-
-// SW3 press always requests Alarm OFF
-void PORTA_IRQHandler() {
-  NVIC_ClearPendingIRQ(PORTA_IRQn);
-  if (PORTA->ISFR & (1 << SW3)) {
-    BaseType_t hpw = pdFALSE;
-    xSemaphoreGiveFromISR(disarm_signal, &hpw);
-    portYIELD_FROM_ISR(hpw);
-  }
-  PORTA->ISFR |= (1 << SW3);
-}
 
 // State updater task
 void stateControllerTask(void *p) {
@@ -834,7 +787,6 @@ int main(void) {
   ledOff();
 
   // Initialize interrupts for SW3, TILTSWITCH and ADC
-  initSW3Interrupt();
   initTILTSWITCHInterrupt();
 
   // Set the TPM clock
