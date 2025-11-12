@@ -89,7 +89,7 @@ typedef enum {
 volatile double adcValue = 0;
 volatile int newDataReady = 0;
 volatile float filteredAdcValue = 0.0f; // Stores the smoothed ADC value
-volatile uint16_t ADC_THRESHOLD = 200; //default threshold
+volatile uint16_t ADC_THRESHOLD = 50; //default threshold
 
 #define BAUD_RATE 9600
 #define UART_TX_PTE22 	22
@@ -731,7 +731,7 @@ static void convertADCTask(void *p) {
         xQueueSend(dataQueue, &adcValue, 0);
 
 	  // Trigger alarm on LOW light: adcValue below threshold
-	  if (adcValue > ADC_THRESHOLD) {
+	  if (adcValue < ADC_THRESHOLD) {
 		  xSemaphoreGive(alarm_signal);
 	  }
 
