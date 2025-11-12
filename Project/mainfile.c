@@ -24,10 +24,10 @@
 #include "task.h"
 #include "queue.h"
 
-QueueHandle_t dataQueue; //queue for ADC
+QueueHandle_t dataQueue; // queue for ADC
 
-SemaphoreHandle_t alarm_signal; //Semaphore handling alarm is triggered
-SemaphoreHandle_t disarm_signal; //Semaphore handling disarm is triggered
+SemaphoreHandle_t alarm_signal;  // Semaphore: request Alarm ON
+SemaphoreHandle_t disarm_signal; // Semaphore: request Alarm OFF
 
 static volatile BaseType_t stopFlag = 0;   // shared state
 
@@ -35,9 +35,6 @@ static TaskHandle_t taskHappyHandle = NULL;
 static TaskHandle_t taskAlarmHandle = NULL;
 
 
-QueueHandle_t dataQueue; // Renamed from dataQueue, queue for ADC
-SemaphoreHandle_t arm_state_signal; // Semaphore handling arm/disarmed (used as a mutex/binary sem)
-SemaphoreHandle_t alarm_signal; // Semaphore handling LDR sensor (used as a binary sem)
 // SemaphoreHandle_t adcValueMutex; // Not needed with queue
 SemaphoreHandle_t systemStateMutex;
 // Global structure to hold the current system state for UART transmission
@@ -46,7 +43,7 @@ typedef struct {
   uint8_t isAlarming; // 1 when siren is active (e.g., LDR over threshold or IMU_TILT=1 while enabled)
 } SystemState_t;
 
-volatile SystemState_t currentState = {0, 0}; // Initialize: Disarmed, Not Alarming
+volatile SystemState_t currentState = {1, 0}; // Default: Alarm OFF (isArmed=1), Not Alarming
 
 // Buzzer is connected to PTE29, which corresponds to TPM0_CH2 (originally Blue LED pin)
 #define BUZZER_PIN	29	// PTE29 (TPM0_CH2)
@@ -207,6 +204,55 @@ void sendMessage(char *message) {
 
 	// Enable the transmitter
 	UART2->C2 |= UART_C2_TE_MASK;
+}
+
+// --- UART RX task: parse ESP32 commands and raise semaphores accordingly ---
+static void recvTask(void *p) {
+  while(1) {
+    TMessage msg;
+    if(xQueueReceive(queue, (TMessage *) &msg, portMAX_DELAY) == pdTRUE) {
+      // Trim CRLF
+      char *line = msg.message;
+      size_t n = strlen(line);
+      while (n && (line[n-1] == '\r' || line[n-1] == '\n')) { line[--n] = '\0'; }
+
+      if (strncmp(line, "ALARM_ON", 8) == 0) {
+        // Turn alarm ON
+        xSemaphoreGive(alarm_signal);
+      } else if (strncmp(line, "ALARM_OFF", 9) == 0) {
+        // Turn alarm OFF
+        xSemaphoreGive(disarm_signal);
+      } else if (strncmp(line, "TH_LIGHT=", 9) == 0) {
+        // Set LDR threshold
+        const char *pnum = line + 9; unsigned val = 0;
+        while (*pnum >= '0' && *pnum <= '9') { val = val*10 + (unsigned)(*pnum - '0'); pnum++; }
+        ADC_THRESHOLD = (uint16_t)val;
+      } else if (strncmp(line, "IMU_TILT=", 9) == 0) {
+        int tilt = (line[9] == '1') ? 1 : 0;
+        if (tilt) {
+          xSemaphoreGive(alarm_signal); // IMU tilt triggers alarm ON
+        }
+      }
+    }
+  }
+}
+
+// --- UART TX task: periodically report STATUS to ESP32 ---
+static void sendTask(void *p) {
+  char buffer[MAX_MSG_LEN];
+  while(1) {
+    uint8_t alarm_on = 0;
+    uint16_t light_val = adcValue;
+
+    // Map STATUS alarm to current alarm state
+    taskENTER_CRITICAL();
+    alarm_on = (currentState.isAlarming ? 1 : 0);
+    taskEXIT_CRITICAL();
+
+    snprintf(buffer, sizeof(buffer), "STATUS alarm=%u light=%u\n", (unsigned)alarm_on, (unsigned)light_val);
+    sendMessage(buffer);
+    vTaskDelay(pdMS_TO_TICKS(500)); // ~2 Hz
+  }
 }
 
 static void recvTask(void *p) {
@@ -378,39 +424,34 @@ void initTILTSWITCHInterrupt() {
   NVIC_EnableIRQ(PORTC_PORTD_IRQn);
 }
 
-// TILTSWITCH IRQHandler.  TILTSWITCH switches on the red LED
+// TILTSWITCH falling edge: if alarm currently ON -> request OFF, else request ON
 void PORTC_PORTD_IRQHandler() {
-  // Clear pending IRQ for PORTC
-	NVIC_ClearPendingIRQ(PORTC_PORTD_IRQn);
-
-	// Check that it is TILTSWITCH pressed
-	if (PORTC->ISFR & 1 << TILTSWITCH) {
-	  GPIOD->PSOR = (1 << INTERRUPTPIN);  // Toggle mode
-	  BaseType_t hpw = pdFALSE;
-	  xSemaphoreGiveFromISR(alarm_signal, &hpw);
-	  portYIELD_FROM_ISR(hpw);
-	}
-	// Write a 1 to clear the ISFR bit
-	PORTC->ISFR |= (1 << TILTSWITCH);
+  NVIC_ClearPendingIRQ(PORTC_PORTD_IRQn);
+  if (PORTC->ISFR & (1 << TILTSWITCH)) {
+    BaseType_t hpw = pdFALSE;
+    // Read current alarming state atomically
+    uint8_t alarming;
+    taskENTER_CRITICAL(); alarming = currentState.isAlarming; taskEXIT_CRITICAL();
+    if (alarming) {
+        xSemaphoreGiveFromISR(disarm_signal, &hpw);
+    } else {
+        xSemaphoreGiveFromISR(alarm_signal, &hpw);
+    }
+    portYIELD_FROM_ISR(hpw);
+  }
+  PORTC->ISFR |= (1 << TILTSWITCH);
 }
 
 
-// SW3 IRQHandler.  SW3 switches on the red LED
+// SW3 press always requests Alarm OFF
 void PORTA_IRQHandler() {
-  // Clear pending IRQ for PORTA
   NVIC_ClearPendingIRQ(PORTA_IRQn);
-
-  // Check that it is SW2 pressed
-  if (PORTA->ISFR & 1 << SW3) {
-	  GPIOD->PCOR = (1 << INTERRUPTPIN);  // Toggle mode
-	  BaseType_t hpw = pdFALSE;
-	  xSemaphoreGiveFromISR(disarm_signal, &hpw);
-	  portYIELD_FROM_ISR(hpw);
-      // Clear interrupt flag correctly
-//      PORTA->PCR[SW3] |= PORT_PCR_ISF_MASK;
+  if (PORTA->ISFR & (1 << SW3)) {
+    BaseType_t hpw = pdFALSE;
+    xSemaphoreGiveFromISR(disarm_signal, &hpw);
+    portYIELD_FROM_ISR(hpw);
   }
-    // Write a 1 to clear the ISFR bit
-    PORTA->ISFR |= (1 << SW3);
+  PORTA->ISFR |= (1 << SW3);
 }
 
 // State updater task
@@ -808,12 +849,11 @@ static void convertADCTask(void *p) {
         adcValue = newValue;
 
         xQueueSend(dataQueue, &adcValue, 0);
-//        PRINTF("adcValue: %4d \r \n", adcValue);
 
-        // check if threshold event should happen
-//        if (adcValue > ADC_THRESHOLD) {
-//            xSemaphoreGive(alarm_signal);
-//        }
+  // Trigger alarm on LOW light: adcValue below threshold
+  if (adcValue > ADC_THRESHOLD) {
+      xSemaphoreGive(alarm_signal);
+  }
 
         vTaskDelay(pdMS_TO_TICKS(10));  // sample every 10 ms (100 Hz)
     }
@@ -880,17 +920,23 @@ int main(void) {
   setPWM(LED, 0);  // Start with LED off
   startLEDPWM();  //Start LED PWM channel
 
-  alarm_signal = xSemaphoreCreateBinary(); //Create mutex for arming
-  disarm_signal = xSemaphoreCreateMutex(); //Create mutex for disarming
+  alarm_signal = xSemaphoreCreateBinary();  // Binary semaphore: request Alarm ON
+  disarm_signal = xSemaphoreCreateBinary(); // Binary semaphore: request Alarm OFF
   dataQueue = xQueueCreate(10, sizeof(uint16_t)); //Create queue for ADC
 
   // Create the new mutex for the UART global state
 	systemStateMutex = xSemaphoreCreateMutex();
 	queue = xQueueCreate(QLEN, sizeof(TMessage)); // For UART receive task
 
+  // Initialize UART2 after RX queue exists
+  initUART2(BAUD_RATE);
+
 
 //  adcValueMutex = xSemaphoreCreateMutex();	//Create mutex for ADC conversion
   xTaskCreate(stateControllerTask, "controller", configMINIMAL_STACK_SIZE+100, NULL, 4,NULL);
+  // UART tasks for protocol with ESP32
+  xTaskCreate(recvTask, "uart_recv", configMINIMAL_STACK_SIZE+120, NULL, 2, NULL);
+  xTaskCreate(sendTask, "uart_send", configMINIMAL_STACK_SIZE+120, NULL, 2, NULL);
   xTaskCreate(playHappyTuneTask, "task_happy", configMINIMAL_STACK_SIZE+100, NULL, 2, &taskHappyHandle);
   xTaskCreate(playPoliceSirenTask, "task_alert", configMINIMAL_STACK_SIZE+100, NULL, 2, &taskAlarmHandle);
   xTaskCreate(convertADCTask, "task_adc", configMINIMAL_STACK_SIZE+100, NULL, 3, NULL);
