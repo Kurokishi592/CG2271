@@ -327,8 +327,8 @@ void PORTC_PORTD_IRQHandler() {
     taskENTER_CRITICAL(); alarming = currentState.isAlarming; taskEXIT_CRITICAL();
     if (alarming) {
         xSemaphoreGiveFromISR(disarm_signal, &hpw);
+        portYIELD_FROM_ISR(hpw);
     }
-    portYIELD_FROM_ISR(hpw);
   }
   PORTC->ISFR |= (1 << TILTSWITCH);
 }
