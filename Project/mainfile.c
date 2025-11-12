@@ -522,8 +522,8 @@ void playToneInterruptible(uint32_t freq, uint32_t duration_ms)
         	setBuzzerFrequency(0);
             return; // Immediate exit
         }
-    vTaskDelay(pdMS_TO_TICKS(1));
-    elapsed++;
+		delay_ms(1);
+		elapsed++;
     }
 
     setBuzzerFrequency(0);   // immediate cutoff after done playing
