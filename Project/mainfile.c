@@ -160,7 +160,7 @@ void UART2_FLEXIO_IRQHandler(void)
 	// Send and receive pointers
 	static int recv_ptr=0, send_ptr=0;
 	char rx_data;
-	char recv_buffer[MAX_MSG_LEN];
+  static char recv_buffer[MAX_MSG_LEN];
 
 //VIC_ClearPendingIRQ(UART2_FLEXIO_IRQn);
 	if(UART2->S1 & UART_S1_TDRE_MASK) // Send data
@@ -327,8 +327,8 @@ void PORTC_PORTD_IRQHandler() {
     taskENTER_CRITICAL(); alarming = currentState.isAlarming; taskEXIT_CRITICAL();
     if (alarming) {
         xSemaphoreGiveFromISR(disarm_signal, &hpw);
-        portYIELD_FROM_ISR(hpw);
     }
+    portYIELD_FROM_ISR(hpw);
   }
   PORTC->ISFR |= (1 << TILTSWITCH);
 }
@@ -336,34 +336,44 @@ void PORTC_PORTD_IRQHandler() {
 
 // State updater task
 void stateControllerTask(void *p) {
-    while (1) {
-    	if (xSemaphoreTake(alarm_signal, portMAX_DELAY) == pdTRUE) {
-            // Toggle the logical state (persistent memory)
-            taskENTER_CRITICAL();     // ensures atomicity
-            currentState.isAlarming = 1;
-            currentState.isArmed = 0;
-            stopFlag = 1;
-            taskEXIT_CRITICAL();
-            // Wake the relevant task
-            xTaskNotify(taskHappyHandle, 0, eNoAction);
-            xTaskNotify(taskAlarmHandle, 0, eNoAction);
+  while (1) {
+    // Only wait on the semaphore that makes sense for the current state,
+    // with a short timeout to remain responsive to other events.
+    uint8_t alarming;
+    taskENTER_CRITICAL();
+    alarming = currentState.isAlarming;
+    taskEXIT_CRITICAL();
 
-    	}
-    	if (xSemaphoreTake(disarm_signal, portMAX_DELAY) == pdTRUE) {
-            // Toggle the logical state (persistent memory)
-            taskENTER_CRITICAL();     // ensures atomicity
-            currentState.isAlarming = 0;
-            currentState.isArmed = 1;
-            stopFlag = 1;
-            taskEXIT_CRITICAL();
+    if (!alarming) {
+      // Alarm is currently OFF: watch for any ON request
+      if (xSemaphoreTake(alarm_signal, pdMS_TO_TICKS(5)) == pdTRUE) {
+        taskENTER_CRITICAL();
+        currentState.isAlarming = 1;
+        currentState.isArmed = 0;
+        stopFlag = 1; // interrupt any ongoing tune immediately
+        taskEXIT_CRITICAL();
 
-            // Wake the relevant task
-            xTaskNotify(taskHappyHandle, 0, eNoAction);
-            xTaskNotify(taskAlarmHandle, 0, eNoAction);
+        // Nudge both tone tasks so they can switch promptly
+        xTaskNotify(taskHappyHandle, 0, eNoAction);
+        xTaskNotify(taskAlarmHandle, 0, eNoAction);
+      }
+    } else {
+      // Alarm is currently ON: watch for any OFF request
+      if (xSemaphoreTake(disarm_signal, pdMS_TO_TICKS(5)) == pdTRUE) {
+        taskENTER_CRITICAL();
+        currentState.isAlarming = 0;
+        currentState.isArmed = 1;
+        stopFlag = 1; // interrupt siren immediately
+        taskEXIT_CRITICAL();
 
-        }
-
+        xTaskNotify(taskHappyHandle, 0, eNoAction);
+        xTaskNotify(taskAlarmHandle, 0, eNoAction);
+      }
     }
+
+    // Cooperative yield to ensure quick preemption even under load
+    vTaskDelay(pdMS_TO_TICKS(1));
+  }
 }
 
 //BUZZER CODE SECTION
@@ -512,8 +522,8 @@ void playToneInterruptible(uint32_t freq, uint32_t duration_ms)
         	setBuzzerFrequency(0);
             return; // Immediate exit
         }
-        delay_ms(1); //it exists so therefore it does
-        elapsed++;
+    vTaskDelay(pdMS_TO_TICKS(1));
+    elapsed++;
     }
 
     setBuzzerFrequency(0);   // immediate cutoff after done playing
