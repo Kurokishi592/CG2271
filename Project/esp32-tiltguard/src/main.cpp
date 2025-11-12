@@ -297,7 +297,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
     <button onclick="cmd('alarm_off')">ALARM OFF</button>
   </div>
   <div class="row">
-    Light threshold (% of ambient): <input id="thl" type="range" min="0" max="1000" value="50" oninput="sl(this)" onchange="sl(this)"> <span id="thlVal">50</span>
+    Light threshold (% of ambient): <input id="thl" type="range" min="0" max="100" value="50" oninput="sl(this)" onchange="sl(this)"> <span id="thlVal">50</span>
   </div>
   <div class="row">
     Tilt threshold (deg): <input id="tht" type="range" min="5" max="90" value="30" oninput="slTilt(this)" onchange="slTilt(this)"> <span id="thtVal">30</span>
