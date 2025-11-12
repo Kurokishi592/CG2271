@@ -86,7 +86,7 @@ typedef enum {
     LED
 } TDEVICE;
 
-volatile uint16_t adcValue = 0;
+volatile double adcValue = 0;
 volatile int newDataReady = 0;
 volatile float filteredAdcValue = 0.0f; // Stores the smoothed ADC value
 volatile uint16_t ADC_THRESHOLD = 200; //default threshold
@@ -649,13 +649,9 @@ void stopLEDPWM() {
  * @param device: Which device to control (LED)
  * @param percent: Brightness 0-100%
  */
-void setPWM(int device, int percent) {
+void setPWM(int device, double percent) {
     // Limit to 0-100 range
-    if (percent < 0) percent = 0;
-    if (percent > 100) percent = 100;
-
-    int value = (int)((percent / 100.0) * (double) TPM1->MOD);
-
+    int value = (int)((percent / 100) * (double) TPM1->MOD);
     switch(device){
         case LED:
             TPM1->CONTROLS[1].CnV = value;
@@ -726,43 +722,29 @@ uint16_t readADC(int channel) {
 static void convertADCTask(void *p) {
     while (1) {
         uint16_t newValue = readADC(ADC_CHANNEL);
-        adcValue = newValue;
-
+    	double brightness = (newValue - 3700) / (double) 300;
+    	int converted = (int) ((1 - brightness) * (100));
+        if (converted < 0) converted = 0;
+        if (converted > 100) converted = 100;
+        adcValue = converted;
+//        PRINTF("adcValue: %d\r\n", converted);
         xQueueSend(dataQueue, &adcValue, 0);
 
-  // Trigger alarm on LOW light: adcValue below threshold
-  if (adcValue > ADC_THRESHOLD) {
-      xSemaphoreGive(alarm_signal);
-  }
+	  // Trigger alarm on LOW light: adcValue below threshold
+	  if (adcValue > ADC_THRESHOLD) {
+		  xSemaphoreGive(alarm_signal);
+	  }
 
         vTaskDelay(pdMS_TO_TICKS(10));  // sample every 10 ms (100 Hz)
     }
 }
 
 static void setPWMTask(void *p) {
-//	uint16_t currentValue;
 	while (1){
         if (xQueueReceive(dataQueue, &adcValue, portMAX_DELAY)) {
     		//TODO: Add adc smoothening here
-            // Apply Exponential Moving Average (EMA) filter
-            if (filteredAdcValue == 0.0f) {
-                // Initial state: set filter value to the first reading
-                filteredAdcValue = (float)adcValue;
-            } else {
-                // V_filtered = Alpha * V_new + (1 - Alpha) * V_filtered_old
-                filteredAdcValue = (SMOOTHING_ALPHA * (float)adcValue) +
-                                   ((1.0f - SMOOTHING_ALPHA) * filteredAdcValue);
-            }
 
-            // --- MODIFIED BRIGHTNESS CALCULATION (Using Smoothed Value) ---
-
-            // Use the smoothed value for inversion. Note: We cast to int for inversion,
-            // but keep the double/float for the division/percentage calculation.
-
-            // Light Meter Function: Bright LDR light -> BRIGHT LED (low CnV value)
-            int invertedAdc = MAX_ADC_VALUE - (int)filteredAdcValue;
-            int brightness = (int)(((float)invertedAdc / (float)MAX_ADC_VALUE) * 100.0f);
-    		setPWM(LED, brightness);
+    		setPWM(LED, adcValue);
         }
 
 		vTaskDelay(pdMS_TO_TICKS(10)); // update at same rate
@@ -814,8 +796,8 @@ int main(void) {
 //  adcValueMutex = xSemaphoreCreateMutex();	//Create mutex for ADC conversion
   xTaskCreate(stateControllerTask, "controller", configMINIMAL_STACK_SIZE+100, NULL, 4,NULL);
   // UART tasks for protocol with ESP32
-  xTaskCreate(recvTask, "uart_recv", configMINIMAL_STACK_SIZE+120, NULL, 2, NULL);
-  xTaskCreate(sendTask, "uart_send", configMINIMAL_STACK_SIZE+120, NULL, 2, NULL);
+  xTaskCreate(recvTask, "uart_recv", configMINIMAL_STACK_SIZE+120, NULL, 3, NULL);
+  xTaskCreate(sendTask, "uart_send", configMINIMAL_STACK_SIZE+120, NULL, 3, NULL);
   xTaskCreate(playHappyTuneTask, "task_happy", configMINIMAL_STACK_SIZE+100, NULL, 2, &taskHappyHandle);
   xTaskCreate(playPoliceSirenTask, "task_alert", configMINIMAL_STACK_SIZE+100, NULL, 2, &taskAlarmHandle);
   xTaskCreate(convertADCTask, "task_adc", configMINIMAL_STACK_SIZE+100, NULL, 3, NULL);
